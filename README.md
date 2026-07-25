@@ -35,7 +35,7 @@ results/              Auto-populated by successful runs
 3. In Kaggle notebook: Add-ons → Secrets → add `GITHUB_TOKEN` and `WANDB_API_KEY`
 4. Set Accelerator = **GPU T4 x2**, Internet = ON
 5. Import notebook from GitHub, set VARIANT and SMOKE, Save & Run All
-6. Results push to GitHub only if the run succeeds (no NaN, loss < 1e10)
+6. Results push to GitHub only if the run succeeds (no NaN/Inf)
 7. Monitor training live on wandb.ai
 
 ## Each notebook saves

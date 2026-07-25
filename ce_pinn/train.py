@@ -341,9 +341,8 @@ class Trainer:
         return results
 
     def is_run_valid(self):
-        """Check if the run produced valid results (for push gating)."""
+        """Check if the run produced valid results (for push gating).
+        Only rejects NaN/Inf — even high-loss runs are worth keeping for ablation."""
         if math.isnan(self.best_loss) or math.isinf(self.best_loss):
-            return False
-        if self.best_loss > 1e10:
             return False
         return True
