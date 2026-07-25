@@ -7,35 +7,57 @@ Target: Journal of Computational Physics.
 ## Structure
 
 ```
-ce_pinn/              Core library
+ce_pinn/              Core library (pip-installable)
   equations.py        Exact solutions, ICs, conservation evaluators
   network.py          MLP + hard BC embedding (Lagaris-type)
   projection.py       Polynomial + Helmholtz projection layers
-  train.py            Training loop (Adam -> L-BFGS)
+  train.py            Trainer with W&B logging + checkpointing
 
-experiments/          One folder per benchmark problem
-  kdv_single/         KdV-1: single soliton
-  kdv_two_soliton/    KdV-2: two-soliton collision
-  rlw_single/         RLW-1: single soliton (main contribution)
-  rlw_two_soliton/    RLW-2: two-soliton collision
-  rlw_bore/           RLW-3: undular bore
-  kp_line/            KP-1: line soliton (2D)
-  kp_lump/            KP-2: lump solution (2D)
+notebooks/            One notebook per experiment (run on Kaggle)
+  KdV1_single_soliton.ipynb
+  KdV2_two_soliton.ipynb
+  RLW1_single_soliton.ipynb   ← main contribution
+  RLW2_two_soliton.ipynb
+  RLW3_undular_bore.ipynb
+  KP1_line_soliton.ipynb
+  KP2_lump.ipynb
 
-kaggle/               Kaggle GPU runner
-  run.py              Target dispatcher + auto-push results
-  notebook_cell.py    Paste into one Kaggle cell
+tools/
+  make_paper_figures.py       Load checkpoints → PDF figures + LaTeX tables
 
-results/              Auto-populated by Kaggle runs
+results/              Auto-populated by successful runs
 ```
 
 ## Running on Kaggle
 
 1. Create a GitHub PAT with `repo` scope
-2. Add it as Kaggle Secret named `GITHUB_TOKEN`
-3. Set notebook Accelerator to **GPU T4 x2**, Internet ON
-4. Paste `kaggle/notebook_cell.py` into one cell, set TARGET, Save & Run All
-5. Results push back to `results/<target>/<timestamp>/`
+2. Create a W&B account (free) and get your API key
+3. In Kaggle notebook: Add-ons → Secrets → add `GITHUB_TOKEN` and `WANDB_API_KEY`
+4. Set Accelerator = **GPU T4 x2**, Internet = ON
+5. Import notebook from GitHub, set VARIANT and SMOKE, Save & Run All
+6. Results push to GitHub only if the run succeeds (no NaN, loss < 1e10)
+7. Monitor training live on wandb.ai
+
+## Each notebook saves
+
+```
+results/<run_name>/<timestamp>/
+  config.json           All parameters (reproducibility)
+  history.json          Loss + conservation at every log step
+  model_best.pth        Lowest-loss weights
+  model_final.pth       Final weights + global_step + best_loss
+  results.json          Final errors (L2 abs, L2 rel, Linf) + conservation drift
+  solution_final.npz    Predicted + exact solution arrays (for plotting)
+```
+
+## Making paper figures
+
+```bash
+git pull
+python tools/make_paper_figures.py results/
+```
+
+Produces PDF figures + LaTeX error table from all completed runs.
 
 ## Variants
 
