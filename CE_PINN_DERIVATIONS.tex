@@ -1,0 +1,1304 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage[colorlinks=true,linkcolor=blue,citecolor=blue]{hyperref}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{proposition}{Proposition}
+\newtheorem{lemma}{Lemma}
+\theoremstyle{remark}
+\newtheorem{remark}{Remark}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\dx}{\,\mathrm{d}x}
+\newcommand{\dy}{\,\mathrm{d}y}
+\newcommand{\dt}{\,\mathrm{d}t}
+\newcommand{\ut}{\tilde{u}}
+\newcommand{\us}{u^{*}}
+\newcommand{\Om}{\Omega}
+
+\title{\textbf{CE-PINN: Complete Mathematical Derivations}\\[0.4em]
+\large Conservation-Embedded Physics-Informed Neural Networks\\
+\large for Derivative-Dependent Invariants}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+This document derives every step of the CE-PINN method, from the governing
+equations through to the gradient used in backpropagation. Sections marked
+\textbf{[PRIOR]} reproduce existing results (PINN-Proj, SDIFP) for completeness
+and to establish exactly where they stop. Sections marked \textbf{[NEW]} are the
+contribution of this work. Every algebraic step is written out.
+\end{abstract}
+
+\tableofcontents
+
+\bigskip\hrule\bigskip
+
+%==========================================================================
+\section{Notation}
+%==========================================================================
+
+Throughout, $\Om = [a,b] \subset \R$ is the spatial domain with length
+$|\Om| = b-a$, and $[0,T]$ is the time interval. The exact solution is $u(x,t)$;
+the raw neural network output is $N(x,t;\theta)$ with parameters $\theta$; the
+output after imposing boundary conditions is $\ut(x,t)$; and the output after
+conservation projection is $\us(x,t)$.
+
+We write $\ut_x = \partial \ut/\partial x$ and so on. Spatial integrals are over
+$\Om$ unless stated otherwise. The projection acts on a single time level, so
+$t$ is a fixed parameter inside Sections \ref{sec:prior}--\ref{sec:helm} and we
+suppress it, writing $\ut(x)$ for $\ut(x,t)$.
+
+For the discrete formulation we use a uniform grid
+\begin{equation}
+x_i = a + (i-1)\Delta x, \qquad i = 1,\dots,N, \qquad
+\Delta x = \frac{b-a}{N-1},
+\end{equation}
+and identify a function with its grid vector, $\bm{u} = (u_1,\dots,u_N)^\top \in \R^N$.
+
+%==========================================================================
+\section{Governing equations and their conservation laws}
+%==========================================================================
+
+\subsection{Korteweg--de Vries (KdV)}
+
+\begin{equation}
+u_t + 6uu_x + u_{xxx} = 0 .
+\label{eq:kdv}
+\end{equation}
+
+Conserved integrals:
+\begin{align}
+C_1 &= \int u \dx && \text{(mass, \emph{linear})}, \label{eq:kdv-c1}\\
+C_2 &= \int u^2 \dx && \text{(momentum, \emph{polynomial})}, \label{eq:kdv-c2}\\
+C_3 &= \int \Big(u^3 - \tfrac12 u_x^2\Big) \dx && \text{(energy, \emph{derivative-dependent})}. \label{eq:kdv-c3}
+\end{align}
+
+One-soliton solution:
+\begin{equation}
+u(x,t) = \frac{k^2}{2}\,\mathrm{sech}^2\!\left[\frac{k}{2}\big(x - k^2 t\big)\right],
+\end{equation}
+with amplitude $k^2/2$ and speed $k^2$. On the infinite line,
+\begin{equation}
+C_1 = 2k, \qquad C_2 = \tfrac{2}{3}k^3, \qquad C_3 = \tfrac{1}{5}k^5 .
+\end{equation}
+
+\subsection{Regularised long-wave (RLW)}
+
+\begin{equation}
+u_t + u_x + \varepsilon u u_x - \mu u_{xxt} = 0, \qquad \varepsilon>0,\ \mu>0 .
+\label{eq:rlw}
+\end{equation}
+
+Conserved integrals:
+\begin{align}
+I_1 &= \int u \dx && \text{(mass, \emph{linear})}, \label{eq:rlw-i1}\\
+I_2 &= \int \big(u^2 + \mu u_x^2\big) \dx && \text{(momentum, \emph{derivative-dependent})}, \label{eq:rlw-i2}\\
+I_3 &= \int \big(u^3 + 3u^2\big) \dx && \text{(energy, \emph{polynomial})}. \label{eq:rlw-i3}
+\end{align}
+
+\begin{remark}
+Equation \eqref{eq:rlw-i2} is the central object of this work. The term
+$\mu\int u_x^2\dx$ makes $I_2$ \emph{derivative-dependent}. Every existing
+projection method is restricted to invariants of the form $\int \phi(u)\dx$ and
+therefore cannot enforce $I_2$.
+\end{remark}
+
+Single solitary wave:
+\begin{equation}
+u(x,t) = 3c\;\mathrm{sech}^2\!\left[\frac{1}{2}\sqrt{\frac{\varepsilon c}{\mu(1+\varepsilon c)}}
+\Big(x - (1+\varepsilon c)t - x_0\Big)\right],
+\label{eq:rlw-soliton}
+\end{equation}
+with amplitude $3c$ and speed $1+\varepsilon c$ ($c$ is an amplitude parameter,
+not the speed).
+
+\subsection{Kadomtsev--Petviashvili (KP)}
+
+\begin{equation}
+\big(u_t + 6uu_x + u_{xxx}\big)_x + \sigma u_{yy} = 0, \qquad \sigma = -3 .
+\label{eq:kp}
+\end{equation}
+
+Conserved integrals over $\Om_2 = [a_1,b_1]\times[a_2,b_2]$:
+\begin{align}
+C_1 &= \iint u \dx\dy, \\
+C_2 &= \iint u^2 \dx\dy, \\
+H &= \iint \Big[-u^3 + \tfrac12 u_x^2 + \tfrac32 \big(\partial_x^{-1}u_y\big)^2\Big]\dx\dy .
+\end{align}
+The lump solution for $\sigma=-3$ is
+\begin{equation}
+u(x,y,t) = \frac{4\big(-\xi^2 + y^2 + 1\big)}{\big(\xi^2+y^2+1\big)^2},
+\qquad \xi = x - 3t,
+\end{equation}
+for which $C_2 = 8\pi$ exactly.
+
+%==========================================================================
+\section{The PINN baseline \textbf{[PRIOR]}}
+%==========================================================================
+
+A physics-informed neural network approximates $u$ by a feed-forward network
+$N(x,t;\theta)$ and minimises a composite loss
+\begin{equation}
+\mathcal{L}(\theta)
+= \underbrace{\frac{1}{N_r}\sum_{i=1}^{N_r} \big|r(x_i,t_i)\big|^2}_{\mathcal{L}_{\text{PDE}}}
++ \underbrace{\frac{1}{N_0}\sum_{i=1}^{N_0}\big|N(x_i,0)-f(x_i)\big|^2}_{\mathcal{L}_{\text{IC}}}
++ \underbrace{\frac{1}{N_b}\sum_{i=1}^{N_b}\big|N(x_i^b,t_i)-g(t_i)\big|^2}_{\mathcal{L}_{\text{BC}}},
+\end{equation}
+where $r$ is the PDE residual, e.g.\ for RLW
+\begin{equation}
+r = N_t + N_x + \varepsilon N N_x - \mu N_{xxt},
+\end{equation}
+computed by automatic differentiation.
+
+\begin{remark}[Why soft constraints are insufficient]
+$\mathcal{L}_{\text{IC}}$, $\mathcal{L}_{\text{BC}}$ and any conservation
+penalty are \emph{soft}: they are minimised, not enforced. Nothing guarantees
+they hold after training. Published evidence is strong: replacing the PDE
+residual with conservation penalties produced $47.8\%$ error on two-soliton NLS
+(Wu et al., 2022). This motivates enforcing physics \emph{by construction}.
+\end{remark}
+
+%==========================================================================
+\section{Layer 1: hard boundary and initial conditions \textbf{[PRIOR]}}
+%==========================================================================
+
+\subsection{Construction}
+
+Consider an evolution equation on $[a,b]\times[0,T]$ with
+\begin{equation}
+u(x,0) = f(x), \qquad u(a,t) = g_a(t), \qquad u(b,t) = g_b(t),
+\end{equation}
+subject to the compatibility conditions
+\begin{equation}
+f(a) = g_a(0), \qquad f(b) = g_b(0).
+\label{eq:compat}
+\end{equation}
+
+Define, with $s = \dfrac{x-a}{b-a} \in [0,1]$,
+\begin{align}
+A(x,t) &= f(x) + (1-s)\big[g_a(t)-g_a(0)\big] + s\big[g_b(t)-g_b(0)\big],
+\label{eq:A}\\
+B(x,t) &= t\,(x-a)(b-x),
+\label{eq:B}
+\end{align}
+and set
+\begin{equation}
+\boxed{\ \ut(x,t;\theta) = A(x,t) + B(x,t)\,N(x,t;\theta). \ }
+\label{eq:hardbc}
+\end{equation}
+
+\subsection{Verification (all three conditions)}
+
+\paragraph{Initial condition, $t=0$.}
+From \eqref{eq:B}, $B(x,0) = 0\cdot(x-a)(b-x) = 0$. From \eqref{eq:A},
+\begin{equation}
+A(x,0) = f(x) + (1-s)\big[g_a(0)-g_a(0)\big] + s\big[g_b(0)-g_b(0)\big]
+= f(x) + 0 + 0 = f(x).
+\end{equation}
+Hence $\ut(x,0) = f(x) + 0\cdot N = f(x)$. \hfill$\checkmark$
+
+\paragraph{Left boundary, $x=a$.}
+Then $s = 0$ and $B(a,t) = t(a-a)(b-a) = 0$. Also
+\begin{equation}
+A(a,t) = f(a) + 1\cdot\big[g_a(t)-g_a(0)\big] + 0 = g_a(0) + g_a(t) - g_a(0) = g_a(t),
+\end{equation}
+using $f(a)=g_a(0)$ from \eqref{eq:compat}. Hence $\ut(a,t) = g_a(t)$. \hfill$\checkmark$
+
+\paragraph{Right boundary, $x=b$.}
+Then $s=1$ and $B(b,t) = t(b-a)(b-b) = 0$. Also
+\begin{equation}
+A(b,t) = f(b) + 0 + 1\cdot\big[g_b(t)-g_b(0)\big] = g_b(0)+g_b(t)-g_b(0) = g_b(t).
+\end{equation}
+Hence $\ut(b,t) = g_b(t)$. \hfill$\checkmark$
+
+All three conditions hold \emph{for every $\theta$}, so $\mathcal{L}_{\text{IC}}$
+and $\mathcal{L}_{\text{BC}}$ can be removed from the loss entirely.
+
+\subsection{Two-dimensional version}
+
+On $\Om_2 = [a_1,b_1]\times[a_2,b_2]$ with homogeneous Dirichlet data on all four
+edges,
+\begin{equation}
+\ut(x,y,t;\theta) = f(x,y) + t\,(x-a_1)(b_1-x)(y-a_2)(b_2-y)\,N(x,y,t;\theta).
+\end{equation}
+At $t=0$ the mask vanishes and $\ut = f$; on each edge one factor vanishes.
+
+%==========================================================================
+\section{Layer 2, prior work: projections for polynomial invariants \textbf{[PRIOR]}}
+\label{sec:prior}
+%==========================================================================
+
+All projections in this section solve
+\begin{equation}
+\min_{\us} \ \int_a^b \big(\us - \ut\big)^2 \dx
+\quad\text{subject to prescribed integral constraints,}
+\end{equation}
+i.e.\ they find the closest function (in $L^2$) satisfying the conservation laws.
+
+\subsection{Case A: single linear constraint (PINN-Proj, Eq.~12)}
+
+Constraint: $\displaystyle\int \us \dx = C_1$.
+
+\paragraph{Step 1. Lagrangian.}
+\begin{equation}
+\mathcal{J}[\us,\lambda] = \int (\us-\ut)^2\dx + \lambda\left(\int \us \dx - C_1\right).
+\end{equation}
+
+\paragraph{Step 2. Variation.}
+Perturb $\us \to \us + \epsilon v$ and differentiate at $\epsilon = 0$:
+\begin{equation}
+\frac{\mathrm{d}}{\mathrm{d}\epsilon}\bigg|_{\epsilon=0}
+\int (\us+\epsilon v-\ut)^2\dx = \int 2(\us-\ut)\,v \dx,
+\qquad
+\frac{\mathrm{d}}{\mathrm{d}\epsilon}\bigg|_{\epsilon=0}
+\lambda\int(\us+\epsilon v)\dx = \lambda\int v\dx .
+\end{equation}
+Setting the total variation to zero for all $v$:
+\begin{equation}
+\int\Big[2(\us-\ut) + \lambda\Big]v\dx = 0 \quad \forall v
+\qquad\Longrightarrow\qquad
+2(\us-\ut) + \lambda = 0 .
+\end{equation}
+
+\paragraph{Step 3. Solve pointwise.}
+\begin{equation}
+\us = \ut - \frac{\lambda}{2}.
+\label{eq:lin-form}
+\end{equation}
+
+\paragraph{Step 4. Impose the constraint.}
+Substituting \eqref{eq:lin-form}:
+\begin{equation}
+\int\left(\ut - \frac{\lambda}{2}\right)\dx = C_1
+\quad\Longrightarrow\quad
+\int \ut \dx - \frac{\lambda}{2}\,|\Om| = C_1
+\quad\Longrightarrow\quad
+\frac{\lambda}{2} = \frac{1}{|\Om|}\left(\int\ut\dx - C_1\right).
+\end{equation}
+
+\paragraph{Step 5. Result.}
+\begin{equation}
+\boxed{\ \us(x) = \ut(x) - \frac{1}{|\Om|}\int \ut \dx + \frac{C_1}{|\Om|}. \ }
+\label{eq:proj-linear}
+\end{equation}
+This is the de-mean-and-reshift correction of PINN-Proj. It is closed-form and
+costs $O(N)$.
+
+\subsection{Case B: single quadratic constraint (PINN-Proj, Eq.~15)}
+
+Constraint: $\displaystyle\int (\us)^2 \dx = C_2$.
+
+\paragraph{Step 1--2. Lagrangian and variation.}
+\begin{equation}
+\mathcal{J} = \int(\us-\ut)^2\dx + \lambda\left(\int(\us)^2\dx - C_2\right),
+\end{equation}
+\begin{equation}
+\delta\mathcal{J} = \int\Big[2(\us-\ut) + 2\lambda \us\Big]v\dx = 0
+\quad\Longrightarrow\quad
+2(\us-\ut) + 2\lambda\us = 0 .
+\end{equation}
+
+\paragraph{Step 3. Solve.}
+\begin{equation}
+\us(1+\lambda) = \ut
+\qquad\Longrightarrow\qquad
+\us = \frac{\ut}{1+\lambda}.
+\end{equation}
+
+\paragraph{Step 4. Impose the constraint.}
+\begin{equation}
+\int \frac{\ut^2}{(1+\lambda)^2}\dx = C_2
+\quad\Longrightarrow\quad
+(1+\lambda)^2 = \frac{\int \ut^2\dx}{C_2}
+\quad\Longrightarrow\quad
+1+\lambda = \sqrt{\frac{\int\ut^2\dx}{C_2}} .
+\end{equation}
+
+\paragraph{Step 5. Result.}
+\begin{equation}
+\boxed{\ \us(x) = \ut(x)\,\sqrt{\frac{C_2}{\int \ut^2 \dx}}. \ }
+\label{eq:proj-quad}
+\end{equation}
+A pure rescaling. Note this destroys $\int\us\dx = C_1$ unless $C_1 = 0$.
+
+\subsection{Case C: both constraints jointly (PINN-Proj Eq.~16--17; SDIFP Eq.~4.2)}
+
+Constraints: $\displaystyle\int\us\dx = C_1$ \emph{and} $\displaystyle\int(\us)^2\dx = C_2$.
+
+\paragraph{Step 1--2. Lagrangian and variation.}
+\begin{equation}
+\mathcal{J} = \int(\us-\ut)^2\dx
++ \lambda_1\left(\int\us\dx - C_1\right)
++ \lambda_2\left(\int(\us)^2\dx - C_2\right),
+\end{equation}
+\begin{equation}
+\delta\mathcal{J}
+= \int\Big[2(\us-\ut) + \lambda_1 + 2\lambda_2\us\Big]v\dx = 0
+\quad\Longrightarrow\quad
+2(\us-\ut) + \lambda_1 + 2\lambda_2\us = 0 .
+\label{eq:joint-el}
+\end{equation}
+
+\paragraph{Step 3. Solve pointwise.}
+Collecting $\us$ terms in \eqref{eq:joint-el}:
+\begin{equation}
+2\us + 2\lambda_2\us = 2\ut - \lambda_1
+\quad\Longrightarrow\quad
+\us(1+\lambda_2) = \ut - \frac{\lambda_1}{2}
+\quad\Longrightarrow\quad
+\us = \frac{\ut - \lambda_1/2}{1+\lambda_2}.
+\label{eq:joint-form}
+\end{equation}
+
+\paragraph{Step 4. Recognise the affine structure.}
+Define
+\begin{equation}
+\alpha = \frac{1}{1+\lambda_2}, \qquad
+\beta = \frac{-\lambda_1/2}{1+\lambda_2},
+\end{equation}
+so that \eqref{eq:joint-form} reads
+\begin{equation}
+\us(x) = \alpha\,\ut(x) + \beta .
+\label{eq:affine}
+\end{equation}
+\emph{The optimal projection is an affine map of the network output.} This is the
+key structural fact about all prior work.
+
+\paragraph{Step 5. Determine $\alpha,\beta$ from the constraints.}
+Introduce the moments
+\begin{equation}
+\tilde m = \frac{1}{|\Om|}\int \ut \dx, \qquad
+\tilde s = \frac{1}{|\Om|}\int \ut^2 \dx, \qquad
+\tilde\sigma^2 = \tilde s - \tilde m^2,
+\end{equation}
+and the targets
+\begin{equation}
+m_0 = \frac{C_1}{|\Om|}, \qquad
+s_0 = \frac{C_2}{|\Om|}, \qquad
+\sigma_0^2 = s_0 - m_0^2 .
+\end{equation}
+
+\emph{First constraint.} Integrating \eqref{eq:affine},
+\begin{equation}
+\int\us\dx = \alpha\int\ut\dx + \beta|\Om| = C_1
+\quad\Longrightarrow\quad
+\alpha\tilde m + \beta = m_0 .
+\label{eq:c1-moment}
+\end{equation}
+
+\emph{Second constraint.} Squaring \eqref{eq:affine} and integrating,
+\begin{equation}
+\int(\us)^2\dx = \alpha^2\int\ut^2\dx + 2\alpha\beta\int\ut\dx + \beta^2|\Om| = C_2,
+\end{equation}
+and dividing by $|\Om|$,
+\begin{equation}
+\alpha^2\tilde s + 2\alpha\beta\tilde m + \beta^2 = s_0 .
+\label{eq:c2-moment}
+\end{equation}
+
+\emph{Eliminate $\beta$.} From \eqref{eq:c1-moment}, $\beta = m_0 - \alpha\tilde m$.
+Substituting into \eqref{eq:c2-moment}:
+\begin{align}
+s_0 &= \alpha^2\tilde s + 2\alpha(m_0-\alpha\tilde m)\tilde m + (m_0-\alpha\tilde m)^2 \\
+&= \alpha^2\tilde s + 2\alpha m_0\tilde m - 2\alpha^2\tilde m^2
+   + m_0^2 - 2\alpha m_0\tilde m + \alpha^2\tilde m^2 \\
+&= \alpha^2\tilde s - \alpha^2\tilde m^2 + m_0^2 \\
+&= \alpha^2\big(\tilde s - \tilde m^2\big) + m_0^2
+ = \alpha^2\tilde\sigma^2 + m_0^2 .
+\end{align}
+Therefore
+\begin{equation}
+\alpha^2\tilde\sigma^2 = s_0 - m_0^2 = \sigma_0^2
+\quad\Longrightarrow\quad
+\alpha = \frac{\sigma_0}{\tilde\sigma},
+\qquad
+\beta = m_0 - \frac{\sigma_0}{\tilde\sigma}\tilde m .
+\end{equation}
+
+\paragraph{Step 6. Result.}
+\begin{equation}
+\boxed{\ \us(x) = \frac{\sigma_0}{\tilde\sigma}\Big(\ut(x) - \tilde m\Big) + m_0 . \ }
+\label{eq:proj-joint}
+\end{equation}
+This is exactly the SDIFP standardisation transform. It is closed-form, $O(N)$,
+and matches the first two moments of the target.
+
+%==========================================================================
+\section{Why prior work cannot handle derivative-dependent invariants \textbf{[NEW analysis]}}
+%==========================================================================
+
+We now make precise the limitation that both PINN-Proj and SDIFP state in words.
+
+Consider the RLW momentum \eqref{eq:rlw-i2},
+\begin{equation}
+I_2[\us] = \int \Big[(\us)^2 + \mu(\us_x)^2\Big]\dx = C_2 .
+\end{equation}
+
+\begin{proposition}[The optimal projection is not affine]
+\label{prop:not-affine}
+Let $\mu > 0$. The minimiser of $\int(\us-\ut)^2\dx$ subject to
+$\int\us\dx = C_1$ and $\int[(\us)^2+\mu(\us_x)^2]\dx = C_2$ has the form
+$\us = \alpha\ut + \beta$ with constants $\alpha,\beta$ \emph{only if} the second
+constraint is inactive.
+\end{proposition}
+
+\begin{proof}
+By Theorem \ref{thm:el} below, the minimiser satisfies
+\begin{equation}
+(1+\lambda_2)\us - \lambda_2\mu\,\us_{xx} = \ut - \frac{\lambda_1}{2}.
+\end{equation}
+Suppose $\us = \alpha\ut+\beta$. Then $\us_{xx} = \alpha\ut_{xx}$ and substitution gives
+\begin{equation}
+(1+\lambda_2)\big(\alpha\ut+\beta\big) - \lambda_2\mu\,\alpha\ut_{xx}
+= \ut - \frac{\lambda_1}{2},
+\end{equation}
+that is,
+\begin{equation}
+\underbrace{\Big[\alpha(1+\lambda_2)-1\Big]}_{\text{coefficient of }\ut}\ut
+\;-\;\underbrace{\lambda_2\mu\alpha}_{\text{coefficient of }\ut_{xx}}\ut_{xx}
+\;+\;\Big[(1+\lambda_2)\beta + \tfrac{\lambda_1}{2}\Big] = 0 .
+\end{equation}
+For this to hold for a general profile $\ut$, in which $\ut$ and $\ut_{xx}$ are
+linearly independent, each coefficient must vanish. The second requires
+$\lambda_2\mu\alpha = 0$. Since $\mu>0$ and $\alpha\neq 0$ (else $\us$ is
+constant), we need $\lambda_2 = 0$, i.e.\ the momentum constraint carries no
+multiplier and is inactive.
+\end{proof}
+
+\begin{remark}[Two distinct failures]
+Proposition \ref{prop:not-affine} identifies the essential obstruction, and there
+are two practical consequences.
+
+\emph{(i) Suboptimality.} The affine family $\{\alpha\ut+\beta\}$ has only two
+degrees of freedom. Two constraints therefore determine it uniquely, leaving no
+freedom to minimise $\|\us-\ut\|$. One can force an affine map to hit the
+\emph{numerical value} of $C_2$, but the resulting $\us$ is not the closest point
+on the constraint manifold, so it perturbs the solution more than necessary.
+
+\emph{(ii) Boundary conditions.} From \eqref{eq:affine},
+$\us(a) = \alpha\,\ut(a) + \beta = \alpha g_a + \beta$, which equals $g_a$ only
+if $\alpha = 1$ and $\beta = 0$. The affine projection therefore destroys the
+Dirichlet data established by Layer 1. This is the content of SDIFP Remark 4.6.
+\end{remark}
+
+%==========================================================================
+\section{Layer 2, this work: the Helmholtz projection \textbf{[NEW]}}
+\label{sec:helm}
+%==========================================================================
+
+\subsection{Problem statement}
+
+Given the boundary-condition-satisfying output $\ut$, find
+\begin{equation}
+\us = \arg\min_{w} \int_a^b \big(w-\ut\big)^2\dx
+\label{eq:helm-obj}
+\end{equation}
+subject to
+\begin{align}
+G_1[w] &:= \int_a^b w \dx - C_1 = 0, \label{eq:helm-g1}\\
+G_2[w] &:= \int_a^b \Big[w^2 + \mu (w_x)^2\Big]\dx - C_2 = 0, \label{eq:helm-g2}\\
+w(a) &= g_a, \qquad w(b) = g_b. \label{eq:helm-bc}
+\end{align}
+
+\subsection{Derivation of the Euler--Lagrange equation}
+
+\begin{theorem}[Helmholtz Euler--Lagrange equation]
+\label{thm:el}
+The minimiser of \eqref{eq:helm-obj}--\eqref{eq:helm-bc} satisfies
+\begin{equation}
+\boxed{\ (1+\lambda_2)\,\us - \lambda_2\mu\,\us_{xx} = \ut - \frac{\lambda_1}{2},
+\qquad \us(a)=g_a,\ \us(b)=g_b, \ }
+\label{eq:helmholtz}
+\end{equation}
+for scalars $\lambda_1,\lambda_2$ determined by \eqref{eq:helm-g1}--\eqref{eq:helm-g2}.
+\end{theorem}
+
+\begin{proof}
+Form the Lagrangian
+\begin{equation}
+\mathcal{J}[\us,\lambda_1,\lambda_2]
+= \int(\us-\ut)^2\dx
++ \lambda_1\left(\int\us\dx - C_1\right)
++ \lambda_2\left(\int\big[(\us)^2 + \mu(\us_x)^2\big]\dx - C_2\right).
+\end{equation}
+
+Perturb $\us \to \us + \epsilon v$ where $v$ is any smooth function with
+\begin{equation}
+v(a) = v(b) = 0
+\label{eq:vbc}
+\end{equation}
+(the boundary values of $\us$ are prescribed, so admissible variations vanish
+there). We compute $\frac{\mathrm d}{\mathrm d\epsilon}\mathcal{J}\big|_{\epsilon=0}$
+term by term.
+
+\paragraph{Term 1: the objective.}
+\begin{equation}
+\frac{\mathrm d}{\mathrm d\epsilon}\int(\us+\epsilon v-\ut)^2\dx
+= \int 2(\us+\epsilon v-\ut)\,v\dx
+\;\xrightarrow[\epsilon\to0]{}\;
+\int 2(\us-\ut)\,v\dx .
+\end{equation}
+
+\paragraph{Term 2: the mass constraint.}
+\begin{equation}
+\frac{\mathrm d}{\mathrm d\epsilon}\,\lambda_1\int(\us+\epsilon v)\dx
+= \lambda_1\int v\dx .
+\end{equation}
+
+\paragraph{Term 3: the momentum constraint.}
+Write the integrand as $(\us+\epsilon v)^2 + \mu(\us_x+\epsilon v_x)^2$. Then
+\begin{equation}
+\frac{\mathrm d}{\mathrm d\epsilon}\,\lambda_2\int\Big[(\us+\epsilon v)^2
++ \mu(\us_x+\epsilon v_x)^2\Big]\dx
+= \lambda_2\int\Big[2(\us+\epsilon v)v + 2\mu(\us_x+\epsilon v_x)v_x\Big]\dx,
+\end{equation}
+which at $\epsilon=0$ becomes
+\begin{equation}
+\lambda_2\int 2\us v\dx + \lambda_2\int 2\mu \us_x v_x \dx .
+\label{eq:term3}
+\end{equation}
+
+The second integral in \eqref{eq:term3} contains $v_x$, not $v$, so we integrate
+by parts:
+\begin{equation}
+\int_a^b 2\mu\,\us_x\,v_x\dx
+= \Big[2\mu\,\us_x\,v\Big]_a^b - \int_a^b 2\mu\,\us_{xx}\,v\dx .
+\end{equation}
+By \eqref{eq:vbc} the boundary term vanishes:
+$\big[2\mu\us_x v\big]_a^b = 2\mu\us_x(b)v(b) - 2\mu\us_x(a)v(a) = 0 - 0 = 0$.
+Hence
+\begin{equation}
+\int 2\mu\,\us_x v_x\dx = -\int 2\mu\,\us_{xx}\,v\dx .
+\label{eq:ibp}
+\end{equation}
+
+\paragraph{Assemble.} Collecting all terms,
+\begin{equation}
+\delta\mathcal{J}
+= \int\Big[\,2(\us-\ut) + \lambda_1 + 2\lambda_2\us - 2\lambda_2\mu\,\us_{xx}\,\Big]\,v\dx = 0
+\qquad\text{for all admissible } v .
+\end{equation}
+By the fundamental lemma of the calculus of variations, the bracket vanishes
+pointwise:
+\begin{equation}
+2(\us-\ut) + \lambda_1 + 2\lambda_2\us - 2\lambda_2\mu\,\us_{xx} = 0 .
+\label{eq:el-raw}
+\end{equation}
+
+\paragraph{Rearrange.} Divide \eqref{eq:el-raw} by $2$:
+\begin{equation}
+\us - \ut + \frac{\lambda_1}{2} + \lambda_2\us - \lambda_2\mu\,\us_{xx} = 0 .
+\end{equation}
+Move $\ut$ and $\lambda_1/2$ to the right and collect $\us$:
+\begin{equation}
+(1+\lambda_2)\us - \lambda_2\mu\,\us_{xx} = \ut - \frac{\lambda_1}{2}. \qedhere
+\end{equation}
+\end{proof}
+
+\subsection{Structure of the resulting operator}
+
+Define the \emph{Helmholtz operator}
+\begin{equation}
+\mathcal{H} := (1+\lambda_2)\,\mathcal{I} - \lambda_2\mu\,\frac{\mathrm d^2}{\mathrm dx^2},
+\end{equation}
+so that \eqref{eq:helmholtz} reads $\mathcal{H}\us = \ut - \lambda_1/2$.
+
+Dividing through by $(1+\lambda_2)$, assuming $\lambda_2 \neq -1$, gives the
+normalised form
+\begin{equation}
+\us - \kappa\,\us_{xx} = h,
+\qquad
+\kappa := \frac{\lambda_2\mu}{1+\lambda_2},
+\qquad
+h := \frac{\ut - \lambda_1/2}{1+\lambda_2}.
+\label{eq:helm-normalised}
+\end{equation}
+
+\begin{proposition}[Prior work is the limiting case $\lambda_2=0$]
+\label{prop:limit}
+Setting $\lambda_2 = 0$ in \eqref{eq:helmholtz} gives $\kappa=0$ and
+\begin{equation}
+\us = \ut - \frac{\lambda_1}{2},
+\end{equation}
+which is precisely the PINN-Proj linear projection \eqref{eq:lin-form}. More
+generally, if the momentum constraint contains no derivative term
+($\mu \to 0$), then $\kappa \to 0$ and \eqref{eq:helm-normalised} reduces to
+$\us = (\ut-\lambda_1/2)/(1+\lambda_2)$, the affine map \eqref{eq:joint-form} of
+prior work.
+\end{proposition}
+
+\noindent
+Proposition \ref{prop:limit} states the relationship of this work to the
+literature: existing projections are the degenerate case in which the elliptic
+term is absent. The term $\lambda_2\mu\,\us_{xx}$ is exactly the correction
+required by the derivative-dependent part of the invariant, and it acts as a
+smoothing operator that redistributes the solution so that the $\int u_x^2$
+content matches the target.
+
+\begin{proposition}[Well-posedness]
+For $\kappa > 0$ the operator $\mathcal{A} := \mathcal{I} - \kappa\,\partial_x^2$
+with Dirichlet boundary conditions is self-adjoint and positive definite, so
+\eqref{eq:helm-normalised} has a unique solution.
+\end{proposition}
+
+\begin{proof}
+On $[a,b]$ with homogeneous Dirichlet data, $-\partial_x^2$ has eigenfunctions
+$\sin\!\big(n\pi(x-a)/|\Om|\big)$ with eigenvalues $\big(n\pi/|\Om|\big)^2 > 0$.
+Hence $\mathcal{A}$ has eigenvalues $1 + \kappa(n\pi/|\Om|)^2 \geq 1 > 0$.
+\end{proof}
+
+\begin{remark}[Boundary conditions are preserved exactly]
+Unlike the affine projection, \eqref{eq:helmholtz} carries Dirichlet data as part
+of the boundary value problem. The projected solution satisfies
+$\us(a)=g_a$ and $\us(b)=g_b$ by construction, so Layer 1 and Layer 2 compose
+without conflict. This is a structural advantage over standardisation, which
+shifts boundary values (SDIFP Remark 4.6).
+\end{remark}
+
+%==========================================================================
+\section{Discretisation \textbf{[NEW]}}
+%==========================================================================
+
+\subsection{The tridiagonal system}
+
+Approximate the second derivative by the standard three-point stencil
+\begin{equation}
+\us_{xx}(x_i) \approx \frac{\us_{i-1} - 2\us_i + \us_{i+1}}{\Delta x^2},
+\qquad i = 2,\dots,N-1 .
+\end{equation}
+Substituting into $\us - \kappa\us_{xx} = h$ at an interior node,
+\begin{equation}
+\us_i - \frac{\kappa}{\Delta x^2}\Big(\us_{i-1} - 2\us_i + \us_{i+1}\Big) = h_i,
+\end{equation}
+and collecting terms with $c := \kappa/\Delta x^2$,
+\begin{equation}
+-c\,\us_{i-1} + \big(1+2c\big)\us_i - c\,\us_{i+1} = h_i,
+\qquad i = 2,\dots,N-1 .
+\label{eq:interior-row}
+\end{equation}
+The boundary nodes are prescribed:
+\begin{equation}
+\us_1 = g_a, \qquad \us_N = g_b .
+\label{eq:boundary-row}
+\end{equation}
+
+In matrix form $\bm{A}\bm{\us} = \bm{h}$ with
+\begin{equation}
+\bm{A} =
+\begin{pmatrix}
+1 & 0 & & & \\
+-c & 1+2c & -c & & \\
+ & \ddots & \ddots & \ddots & \\
+ & & -c & 1+2c & -c \\
+ & & & 0 & 1
+\end{pmatrix},
+\qquad
+\bm{h} =
+\begin{pmatrix}
+g_a \\ h_2 \\ \vdots \\ h_{N-1} \\ g_b
+\end{pmatrix}.
+\label{eq:matrixA}
+\end{equation}
+
+\begin{remark}[Implementation warning]
+\label{rem:bcwarning}
+Only the \emph{super}-diagonal entry of row $1$ and the \emph{sub}-diagonal entry
+of row $N$ are set to zero. The sub-diagonal entry of row $2$ (the coefficient
+$-c$ multiplying $\us_1$) and the super-diagonal entry of row $N-1$ must be
+retained: they carry the boundary data into the interior. Zeroing them decouples
+the first and last interior nodes from the boundary. When $g_a=g_b=0$ this
+happens to be harmless because the dropped terms multiply zero, but it is
+incorrect for non-homogeneous data such as the undular bore, where $g_a = u_0 \neq 0$.
+\end{remark}
+
+\subsection{The Thomas algorithm}
+
+For a tridiagonal system with sub-diagonal $\{a_i\}_{i=2}^{N}$, diagonal
+$\{b_i\}_{i=1}^{N}$, super-diagonal $\{c_i\}_{i=1}^{N-1}$ and right-hand side
+$\{d_i\}$:
+
+\paragraph{Forward elimination.}
+\begin{align}
+c'_1 &= \frac{c_1}{b_1}, &  d'_1 &= \frac{d_1}{b_1}, \\
+c'_i &= \frac{c_i}{b_i - a_i c'_{i-1}}, &
+d'_i &= \frac{d_i - a_i d'_{i-1}}{b_i - a_i c'_{i-1}},
+\qquad i = 2,\dots,N .
+\end{align}
+
+\paragraph{Back substitution.}
+\begin{equation}
+\us_N = d'_N, \qquad
+\us_i = d'_i - c'_i\,\us_{i+1}, \qquad i = N-1,\dots,1 .
+\end{equation}
+
+Total cost: $O(N)$ arithmetic operations, with no fill-in.
+
+\begin{remark}[Vectorised alternative]
+The Thomas recursion is inherently sequential. On a GPU, executing $2N$
+dependent steps as separate kernel launches dominates the runtime. For the grid
+sizes used here ($N \leq 1001$) it is faster in practice to assemble
+\eqref{eq:matrixA} densely and call a batched LU solve for all right-hand sides
+simultaneously. The arithmetic cost rises from $O(N)$ to $O(N^3)$ but the wall
+clock falls by one to two orders of magnitude, because a single dense solve is
+one kernel rather than thousands.
+\end{remark}
+
+\subsection{Quadrature and discrete derivative}
+
+Let $\bm{q}\in\R^N$ be the trapezoidal weight vector,
+\begin{equation}
+q_1 = q_N = \frac{\Delta x}{2}, \qquad q_i = \Delta x \ \ (2\le i\le N-1),
+\end{equation}
+so that $\int w\dx \approx \bm{q}^\top\bm{w}$. Let $\bm{D}\in\R^{N\times N}$ be
+the central-difference first-derivative matrix,
+\begin{equation}
+(\bm{D}\bm{w})_i = \frac{w_{i+1}-w_{i-1}}{2\Delta x}\ \ (2\le i\le N-1),
+\qquad
+(\bm{D}\bm{w})_1 = \frac{w_2-w_1}{\Delta x},
+\qquad
+(\bm{D}\bm{w})_N = \frac{w_N-w_{N-1}}{\Delta x}.
+\end{equation}
+The discrete constraints are then
+\begin{equation}
+F_1(\lambda_1,\lambda_2) = \bm{q}^\top\bm{\us} - C_1,
+\qquad
+F_2(\lambda_1,\lambda_2) = \bm{q}^\top\Big[\bm{\us}\odot\bm{\us}
++ \mu\,(\bm{D}\bm{\us})\odot(\bm{D}\bm{\us})\Big] - C_2,
+\label{eq:discrete-F}
+\end{equation}
+where $\odot$ denotes elementwise product.
+
+%==========================================================================
+\section{The Newton system for the multipliers \textbf{[NEW]}}
+%==========================================================================
+
+Equation \eqref{eq:helmholtz} determines $\us$ once $(\lambda_1,\lambda_2)$ are
+known. The multipliers are fixed by requiring $F_1 = F_2 = 0$. This is a
+$2\times 2$ nonlinear system, solved by Newton's method:
+\begin{equation}
+\begin{pmatrix}\lambda_1\\\lambda_2\end{pmatrix}^{(k+1)}
+=
+\begin{pmatrix}\lambda_1\\\lambda_2\end{pmatrix}^{(k)}
+- \bm{J}^{-1}
+\begin{pmatrix}F_1\\F_2\end{pmatrix}^{(k)},
+\qquad
+\bm{J} = \begin{pmatrix}
+\partial F_1/\partial\lambda_1 & \partial F_1/\partial\lambda_2 \\
+\partial F_2/\partial\lambda_1 & \partial F_2/\partial\lambda_2
+\end{pmatrix}.
+\end{equation}
+
+\subsection{Sensitivity equations}
+
+Define $p_1 := \partial\us/\partial\lambda_1$ and
+$p_2 := \partial\us/\partial\lambda_2$.
+
+\paragraph{Sensitivity with respect to $\lambda_1$.}
+Differentiate \eqref{eq:helmholtz} with respect to $\lambda_1$, holding
+$\lambda_2$ and $\ut$ fixed. The left-hand side gives
+\begin{equation}
+\frac{\partial}{\partial\lambda_1}\Big[(1+\lambda_2)\us - \lambda_2\mu\us_{xx}\Big]
+= (1+\lambda_2)p_1 - \lambda_2\mu\,(p_1)_{xx},
+\end{equation}
+and the right-hand side gives
+\begin{equation}
+\frac{\partial}{\partial\lambda_1}\left[\ut - \frac{\lambda_1}{2}\right] = -\frac12 .
+\end{equation}
+Therefore
+\begin{equation}
+\boxed{\ \mathcal{H}p_1 = -\tfrac12, \qquad p_1(a) = p_1(b) = 0. \ }
+\label{eq:p1}
+\end{equation}
+The homogeneous boundary conditions follow because $\us(a) = g_a$ is prescribed
+independently of $\lambda_1$, so $\partial\us(a)/\partial\lambda_1 = 0$.
+
+\paragraph{Sensitivity with respect to $\lambda_2$.}
+Differentiate \eqref{eq:helmholtz} with respect to $\lambda_2$. Using the product
+rule on both terms of the left-hand side,
+\begin{equation}
+\frac{\partial}{\partial\lambda_2}\Big[(1+\lambda_2)\us\Big]
+= \us + (1+\lambda_2)p_2,
+\qquad
+\frac{\partial}{\partial\lambda_2}\Big[\lambda_2\mu\,\us_{xx}\Big]
+= \mu\,\us_{xx} + \lambda_2\mu\,(p_2)_{xx}.
+\end{equation}
+The right-hand side is independent of $\lambda_2$, so its derivative is zero.
+Hence
+\begin{equation}
+\us + (1+\lambda_2)p_2 - \mu\,\us_{xx} - \lambda_2\mu\,(p_2)_{xx} = 0,
+\end{equation}
+that is,
+\begin{equation}
+\boxed{\ \mathcal{H}p_2 = \mu\,\us_{xx} - \us, \qquad p_2(a) = p_2(b) = 0. \ }
+\label{eq:p2}
+\end{equation}
+
+\begin{remark}
+Both sensitivity problems use \emph{the same operator} $\mathcal{H}$ as the
+forward solve. One factorisation therefore serves three right-hand sides:
+$\ut - \lambda_1/2$, $-\tfrac12$, and $\mu\us_{xx}-\us$.
+\end{remark}
+
+\subsection{Jacobian entries}
+
+\paragraph{First row.} Since $F_1 = \int\us\dx - C_1$,
+\begin{equation}
+J_{11} = \frac{\partial F_1}{\partial\lambda_1}
+= \int \frac{\partial \us}{\partial\lambda_1}\dx = \int p_1 \dx,
+\qquad
+J_{12} = \frac{\partial F_1}{\partial\lambda_2} = \int p_2 \dx .
+\end{equation}
+
+\paragraph{Second row.} Since $F_2 = \int\big[(\us)^2 + \mu(\us_x)^2\big]\dx - C_2$,
+apply the chain rule inside the integral:
+\begin{equation}
+\frac{\partial}{\partial\lambda_j}\Big[(\us)^2 + \mu(\us_x)^2\Big]
+= 2\us\,\frac{\partial\us}{\partial\lambda_j}
++ 2\mu\,\us_x\,\frac{\partial\us_x}{\partial\lambda_j}
+= 2\us p_j + 2\mu\,\us_x\,(p_j)_x ,
+\end{equation}
+where we used $\partial(\us_x)/\partial\lambda_j = (\partial\us/\partial\lambda_j)_x = (p_j)_x$.
+Hence
+\begin{equation}
+J_{21} = \int\Big[2\us p_1 + 2\mu\,\us_x (p_1)_x\Big]\dx,
+\qquad
+J_{22} = \int\Big[2\us p_2 + 2\mu\,\us_x (p_2)_x\Big]\dx .
+\end{equation}
+
+\subsection{Explicit Newton update}
+
+With $\det\bm{J} = J_{11}J_{22} - J_{12}J_{21}$ and
+\begin{equation}
+\bm{J}^{-1} = \frac{1}{\det\bm{J}}
+\begin{pmatrix} J_{22} & -J_{12} \\ -J_{21} & J_{11}\end{pmatrix},
+\end{equation}
+the update $\Delta\bm\lambda = -\bm{J}^{-1}\bm{F}$ is
+\begin{equation}
+\Delta\lambda_1 = -\frac{J_{22}F_1 - J_{12}F_2}{\det\bm{J}},
+\qquad
+\Delta\lambda_2 = -\frac{-J_{21}F_1 + J_{11}F_2}{\det\bm{J}} .
+\end{equation}
+
+\subsection{Compact discrete form}
+
+Define the matrices
+\begin{equation}
+\bm{P} = \big[\,\bm{p}_1 \ \ \bm{p}_2\,\big] \in \R^{N\times2},
+\qquad
+\bm{R} = \big[\,\bm{r}_1 \ \ \bm{r}_2\,\big] \in \R^{N\times2},
+\end{equation}
+where $\bm{r}_j := \partial F_j/\partial\bm{\us}$ are the constraint gradients,
+\begin{equation}
+\bm{r}_1 = \bm{q},
+\qquad
+\bm{r}_2 = 2\,\bm{q}\odot\bm{\us} + 2\mu\,\bm{D}^\top\big(\bm{q}\odot\bm{D}\bm{\us}\big).
+\label{eq:rvectors}
+\end{equation}
+
+\begin{lemma}[Factorisation of the Jacobian]
+\label{lem:J}
+$\bm{J} = \bm{R}^\top\bm{P}$.
+\end{lemma}
+
+\begin{proof}
+By the chain rule,
+$J_{ij} = \dfrac{\partial F_i}{\partial\lambda_j}
+= \dfrac{\partial F_i}{\partial\bm{\us}}\cdot\dfrac{\partial\bm{\us}}{\partial\lambda_j}
+= \bm{r}_i^\top\bm{p}_j = (\bm{R}^\top\bm{P})_{ij}$.
+\end{proof}
+
+\noindent
+Lemma \ref{lem:J} is not merely cosmetic: it is what makes the backward pass in
+Section \ref{sec:backward} collapse into a projector.
+
+\subsection{Complete forward algorithm}
+
+\begin{enumerate}[label=\textbf{\arabic*.}, leftmargin=2.2em]
+\item Initialise $\lambda_1 = \lambda_2 = 0$ (or warm-start from the previous
+      training step).
+\item Set $\kappa = \lambda_2\mu/(1+\lambda_2)$ and assemble $\bm{A}$ as in
+      \eqref{eq:matrixA}, respecting Remark \ref{rem:bcwarning}.
+\item Build $\bm{h} = (\ut - \lambda_1/2)/(1+\lambda_2)$; overwrite
+      $h_1 \leftarrow g_a$, $h_N \leftarrow g_b$.
+\item Solve $\bm{A}\bm{\us} = \bm{h}$.
+\item Compute $\bm{D}\bm{\us}$ and evaluate $F_1, F_2$ from \eqref{eq:discrete-F}.
+\item If $|F_1| + |F_2| < \epsilon_{\text{tol}}$, go to step 10.
+\item Solve $\bm{A}\bm{p}_1 = \bm{e}_{-1/2}$ and
+      $\bm{A}\bm{p}_2 = \bm{e}_{\mu\us_{xx}-\us}$, both with zero boundary rows.
+\item Assemble $\bm{R}$ from \eqref{eq:rvectors} and $\bm{J} = \bm{R}^\top\bm{P}$.
+\item Update $\bm\lambda \leftarrow \bm\lambda - \bm{J}^{-1}\bm{F}$; return to step 2.
+\item Recompute $\bm{p}_1,\bm{p}_2,\bm{R},\bm{J}$ at the converged $\bm\lambda$
+      and store them for the backward pass. Return $\bm{\us}$.
+\end{enumerate}
+
+\begin{remark}[Why step 10 matters]
+Steps 7--8 are executed \emph{before} the convergence test of the following
+iteration, so on exit the stored sensitivities correspond to the previous
+iterate. They must be recomputed at the converged multipliers, otherwise the
+gradient of Section \ref{sec:backward} is evaluated at the wrong point.
+\end{remark}
+
+\begin{remark}[Convergence]
+Newton's method converges quadratically near the solution provided $\bm{J}$ is
+non-singular, which holds whenever the constraint gradients $\bm{r}_1,\bm{r}_2$
+are linearly independent, i.e.\ whenever the two constraints are not degenerate.
+During training the network changes slowly between steps, so warm-starting
+$\bm\lambda$ typically reduces the iteration count to one or two.
+\end{remark}
+
+%==========================================================================
+\section{Backpropagation through the projection \textbf{[NEW]}}
+\label{sec:backward}
+%==========================================================================
+
+Training requires the gradient of the loss with respect to the network
+parameters. The projection sits between the network and the loss, so we need the
+vector--Jacobian product
+\begin{equation}
+\bm{g}_{\ut} = \left(\frac{\partial\bm{\us}}{\partial\ut}\right)^{\!\top}\bm{g},
+\qquad
+\bm{g} := \frac{\partial\mathcal{L}}{\partial\bm{\us}} .
+\end{equation}
+
+\subsection{The two contributions}
+
+The projected output depends on $\ut$ in two ways: directly through the
+right-hand side of the linear solve, and indirectly because the multipliers
+$\bm\lambda$ are themselves functions of $\ut$. By the chain rule,
+\begin{equation}
+\frac{\partial\bm{\us}}{\partial\ut}
+= \underbrace{\frac{\partial\bm{\us}}{\partial\ut}\bigg|_{\bm\lambda}}_{\text{frozen multipliers}}
+\;+\;
+\underbrace{\bm{p}_1\left(\frac{\partial\lambda_1}{\partial\ut}\right)^{\!\top}
++ \bm{p}_2\left(\frac{\partial\lambda_2}{\partial\ut}\right)^{\!\top}}_{\text{multiplier response}} .
+\label{eq:two-terms}
+\end{equation}
+
+\begin{remark}[This is where an implementation can go wrong]
+Retaining only the first term of \eqref{eq:two-terms} gives a gradient whose
+range is not tangent to the constraint manifold. The result is an approximate
+descent direction rather than the exact implicit-function-theorem gradient.
+The correction below costs one $2\times2$ solve and $O(N)$ work, so there is no
+reason to omit it.
+\end{remark}
+
+\subsection{First term: frozen multipliers}
+
+At fixed $\bm\lambda$, the system is $\bm{A}\bm{\us} = \bm{h}$ with
+$\bm{h} = \bm{E}\,\ut/(1+\lambda_2) + \text{(boundary data)}$, where
+$\bm{E} = \mathrm{diag}(0,1,\dots,1,0)$ zeroes the boundary rows (their values
+$g_a, g_b$ do not depend on $\ut$). Differentiating,
+\begin{equation}
+\bm{A}\,\frac{\partial\bm{\us}}{\partial\ut}\bigg|_{\bm\lambda} = \frac{1}{1+\lambda_2}\bm{E}
+\qquad\Longrightarrow\qquad
+\frac{\partial\bm{\us}}{\partial\ut}\bigg|_{\bm\lambda}
+= \frac{1}{1+\lambda_2}\,\bm{A}^{-1}\bm{E} =: \bm{M} .
+\label{eq:M}
+\end{equation}
+
+\subsection{Second term: multiplier response by the implicit function theorem}
+
+The multipliers satisfy $\bm{F}(\bm\lambda, \ut) = \bm{0}$ identically. Total
+differentiation with respect to $\ut$ gives
+\begin{equation}
+\underbrace{\frac{\partial\bm{F}}{\partial\bm\lambda}}_{=\ \bm{J}}
+\frac{\partial\bm\lambda}{\partial\ut}
++ \frac{\partial\bm{F}}{\partial\ut}\bigg|_{\bm\lambda} = \bm{0}
+\qquad\Longrightarrow\qquad
+\frac{\partial\bm\lambda}{\partial\ut}
+= -\bm{J}^{-1}\frac{\partial\bm{F}}{\partial\ut}\bigg|_{\bm\lambda} .
+\end{equation}
+Now $F_i$ depends on $\ut$ only through $\bm{\us}$, so
+\begin{equation}
+\frac{\partial F_i}{\partial\ut}\bigg|_{\bm\lambda}
+= \frac{\partial F_i}{\partial\bm{\us}}\,
+  \frac{\partial\bm{\us}}{\partial\ut}\bigg|_{\bm\lambda}
+= \bm{r}_i^\top\bm{M},
+\qquad\text{i.e.}\qquad
+\frac{\partial\bm{F}}{\partial\ut}\bigg|_{\bm\lambda} = \bm{R}^\top\bm{M} .
+\end{equation}
+Therefore
+\begin{equation}
+\frac{\partial\bm\lambda}{\partial\ut} = -\bm{J}^{-1}\bm{R}^\top\bm{M} .
+\end{equation}
+
+\subsection{Assembling the full Jacobian}
+
+Substituting into \eqref{eq:two-terms} and writing the multiplier-response term
+as $\bm{P}\,\partial\bm\lambda/\partial\ut$,
+\begin{equation}
+\frac{\partial\bm{\us}}{\partial\ut}
+= \bm{M} - \bm{P}\bm{J}^{-1}\bm{R}^\top\bm{M}
+= \Big(\bm{I} - \bm{P}\bm{J}^{-1}\bm{R}^\top\Big)\bm{M} .
+\label{eq:full-jac}
+\end{equation}
+
+Using Lemma \ref{lem:J}, $\bm{J} = \bm{R}^\top\bm{P}$, so
+\begin{equation}
+\boxed{\
+\frac{\partial\bm{\us}}{\partial\ut}
+= \Big(\bm{I} - \bm{P}\big(\bm{R}^\top\bm{P}\big)^{-1}\bm{R}^\top\Big)\bm{M}
+=: \big(\bm{I} - \bm\Pi\big)\bm{M} .
+\ }
+\end{equation}
+
+\begin{proposition}[$\bm\Pi$ is an oblique projector]
+$\bm\Pi := \bm{P}(\bm{R}^\top\bm{P})^{-1}\bm{R}^\top$ satisfies
+$\bm\Pi^2 = \bm\Pi$. It projects onto $\mathrm{range}(\bm{P})$ along
+$\mathrm{range}(\bm{R})^\perp$.
+\end{proposition}
+
+\begin{proof}
+\begin{equation}
+\bm\Pi^2 = \bm{P}(\bm{R}^\top\bm{P})^{-1}\underbrace{\bm{R}^\top\bm{P}}_{=\bm{J}}
+(\bm{R}^\top\bm{P})^{-1}\bm{R}^\top
+= \bm{P}(\bm{R}^\top\bm{P})^{-1}\bm{R}^\top = \bm\Pi . \qedhere
+\end{equation}
+\end{proof}
+
+\begin{remark}[Interpretation]
+The factor $\bm{I}-\bm\Pi$ removes exactly the components of the gradient that
+would move the solution off the constraint manifold. The backward pass therefore
+enforces conservation not only in the forward direction but also in the
+optimisation direction: the network never receives a gradient signal telling it
+to violate $C_1$ or $C_2$.
+\end{remark}
+
+\subsection{Practical backward algorithm}
+
+Transposing \eqref{eq:full-jac},
+\begin{equation}
+\bm{g}_{\ut}
+= \bm{M}^\top\Big(\bm{I} - \bm{R}\bm{J}^{-\top}\bm{P}^\top\Big)\bm{g}
+= \bm{M}^\top\Big(\bm{g} - \bm{R}\,\bm{J}^{-\top}\bm{P}^\top\bm{g}\Big),
+\end{equation}
+which is evaluated in four steps:
+
+\begin{enumerate}[label=\textbf{\arabic*.}, leftmargin=2.2em]
+\item Form $\bm{s} = \bm{P}^\top\bm{g}
+      = \big(\bm{p}_1^\top\bm{g},\ \bm{p}_2^\top\bm{g}\big)^\top \in \R^2$.
+\item Solve the $2\times2$ system $\bm{J}^\top\bm{z} = \bm{s}$.
+\item Form $\bm{g}_{\text{eff}} = \bm{g} - z_1\bm{r}_1 - z_2\bm{r}_2$.
+\item Solve $\bm{A}^\top\bm{w} = \bm{g}_{\text{eff}}$ and set
+      $\bm{g}_{\ut} = \bm{E}\bm{w}/(1+\lambda_2)$.
+\end{enumerate}
+
+\begin{remark}[Transpose, not inverse]
+$\bm{A}$ in \eqref{eq:matrixA} is symmetric in its interior but \emph{not}
+overall, because the boundary rows are $(1,0,\dots)$ and $(\dots,0,1)$ while the
+adjacent columns retain $-c$. Step 4 must therefore solve with $\bm{A}^\top$,
+which is again tridiagonal (with sub- and super-diagonal $-c$ in every position
+and diagonal $(1, 1+2c, \dots, 1+2c, 1)$), so the cost is unchanged.
+\end{remark}
+
+The backward pass requires one tridiagonal solve, one $2\times2$ solve, and
+$O(N)$ vector arithmetic. It is no more expensive than the naive frozen-$\lambda$
+version, and it is exact.
+
+%==========================================================================
+\section{Cost analysis \textbf{[NEW]}}
+%==========================================================================
+
+\begin{table}[h]
+\centering
+\begin{tabular}{llll}
+\toprule
+Stage & Operation & Count & Cost \\
+\midrule
+Forward, per Newton step
+ & assemble $\bm{A}$              & 1 & $O(N)$ \\
+ & tridiagonal solve              & 3 \ ($\bm\us,\bm p_1,\bm p_2$) & $O(N)$ \\
+ & finite-difference derivatives  & 3 & $O(N)$ \\
+ & quadratures ($F_1,F_2,\bm{J}$) & 5 & $O(N)$ \\
+ & $2\times2$ solve               & 1 & $O(1)$ \\
+\midrule
+Backward
+ & $\bm{P}^\top\bm{g}$            & 1 & $O(N)$ \\
+ & $2\times2$ solve               & 1 & $O(1)$ \\
+ & rank-2 correction              & 1 & $O(N)$ \\
+ & tridiagonal solve with $\bm{A}^\top$ & 1 & $O(N)$ \\
+\bottomrule
+\end{tabular}
+\caption{Cost of the Helmholtz projection. Typical Newton counts are 3--5 from a
+cold start and 1--2 when warm-started.}
+\end{table}
+
+\noindent
+For comparison, a single forward pass of an $L$-layer network of width $W$ over
+$N$ points costs $O(NLW^2)$. With $L=8$, $W=50$ this is $2\times10^4$ operations
+per point, against roughly $10N$ for the projection. The projection is therefore
+negligible in arithmetic; the only implementation risk is kernel-launch overhead
+from the sequential Thomas recursion.
+
+%==========================================================================
+\section{Extension to two dimensions \textbf{[NEW]}}
+%==========================================================================
+
+\subsection{Polynomial invariants (KP)}
+
+For $C_1 = \iint u\dx\dy$ and $C_2 = \iint u^2\dx\dy$, the derivation of
+Section \ref{sec:prior} Case C carries over verbatim with $\int\cdot\dx$
+replaced by $\iint\cdot\dx\dy$ and $|\Om|$ by $|\Om_2| = (b_1-a_1)(b_2-a_2)$:
+\begin{equation}
+\us(x,y) = \frac{\sigma_0}{\tilde\sigma}\Big(\ut(x,y) - \tilde m\Big) + m_0 .
+\end{equation}
+Nothing in the derivation used the dimension, which is why the framework is
+dimension-independent for polynomial invariants.
+
+\subsection{Derivative-dependent invariants in 2D}
+
+For an invariant $\iint\big(u^2 + \mu|\nabla u|^2\big)\dx\dy$, repeating the
+variation of Theorem \ref{thm:el} with
+\begin{equation}
+\delta\!\iint \mu|\nabla \us|^2 \dx\dy
+= \iint 2\mu\,\nabla \us\cdot\nabla v \dx\dy
+= \oint 2\mu\,v\,\partial_n \us \,\mathrm{d}s - \iint 2\mu\,v\,\nabla^2\us\dx\dy
+\end{equation}
+(the boundary integral vanishing for $v|_{\partial\Om_2}=0$) gives
+\begin{equation}
+\boxed{\ (1+\lambda_2)\us - \lambda_2\mu\,\nabla^2\us = \ut - \frac{\lambda_1}{2}. \ }
+\end{equation}
+This is the two-dimensional Helmholtz equation. The Newton system remains
+$2\times2$ regardless of dimension; only the elliptic solve changes, from a
+tridiagonal solve to a sparse direct solve ($O(N^{3/2})$), an FFT-based solve
+($O(N\log N)$), or multigrid ($O(N)$).
+
+%==========================================================================
+\section{Feasibility of hard $I_3$ \textbf{[NEW analysis]}}
+%==========================================================================
+
+\subsection{KdV energy}
+
+For $C_3 = \int\big(u^3 - \tfrac12 u_x^2\big)\dx$, the variation of each piece is
+\begin{equation}
+\delta\!\int (\us)^3\dx = \int 3(\us)^2 v\dx,
+\qquad
+\delta\!\int\!-\tfrac12(\us_x)^2\dx = -\int \us_x v_x\dx = \int \us_{xx}v\dx ,
+\end{equation}
+so adding $\lambda_3 G_3$ to the Lagrangian contributes
+$\lambda_3\big(3(\us)^2 + \us_{xx}\big)$ to \eqref{eq:el-raw}, giving
+\begin{equation}
+2(\us-\ut) + \lambda_1 + 2\lambda_2\us - 2\lambda_2\mu\us_{xx}
++ \lambda_3\Big(3(\us)^2 + \us_{xx}\Big) = 0 .
+\end{equation}
+The term $3\lambda_3(\us)^2$ is \emph{nonlinear} in $\us$, so the Euler--Lagrange
+equation is a nonlinear ODE. No single linear solve suffices; Newton on the full
+$N$-dimensional system would be required, with the associated convergence and
+cost concerns.
+
+\subsection{RLW energy}
+
+For $I_3 = \int(u^3+3u^2)\dx$ the contribution is
+$\lambda_3\big(3(\us)^2 + 6\us\big)$, containing no derivative. The
+Euler--Lagrange equation is then a pointwise \emph{quadratic} in $\us$, solvable
+in closed form node by node, but the resulting constraint equation for
+$\lambda_3$ remains nonlinear and requires scalar root-finding nested inside the
+existing Newton iteration.
+
+\subsection{Decision}
+
+$I_3$ is enforced as a soft penalty,
+\begin{equation}
+\mathcal{L}_{\text{soft}} = \frac{1}{N_t}\sum_{k=1}^{N_t}
+\Big(I_3\big[\us(\cdot,t_k)\big] - C_3\Big)^2 ,
+\end{equation}
+and hard enforcement of $I_3$ is stated as future work. The contribution of this
+paper is the hard enforcement of $I_1$ and the derivative-dependent $I_2$.
+
+%==========================================================================
+\section{The complete CE-PINN architecture \textbf{[NEW]}}
+%==========================================================================
+
+\subsection{Forward pass}
+
+\begin{equation}
+(x,t)
+\ \xrightarrow{\ \text{MLP}\ }\ N(x,t;\theta)
+\ \xrightarrow{\ \text{Layer 1, Eq.~\eqref{eq:hardbc}}\ }\ \ut
+\ \xrightarrow{\ \text{Layer 2, Eq.~\eqref{eq:helmholtz}}\ }\ \us
+\end{equation}
+
+Layer 1 makes the initial and boundary conditions exact. Layer 2 makes $C_1$ and
+$C_2$ exact. Both hold for every $\theta$, at every training step, and at
+inference.
+
+\subsection{Loss}
+
+Because the boundary conditions and the first two invariants are structural, the
+loss reduces to
+\begin{equation}
+\boxed{\
+\mathcal{L}(\theta)
+= \frac{1}{N_r}\sum_{i=1}^{N_r}\Big|r\big[\us\big](x_i,t_i)\Big|^2
+\;+\; w_3\,\mathcal{L}_{\text{soft}} \ }
+\end{equation}
+with no $\mathcal{L}_{\text{IC}}$, no $\mathcal{L}_{\text{BC}}$, and no penalty
+for $C_1$ or $C_2$. The residual is evaluated on the \emph{projected} field
+$\us$, not on $\ut$: this is what makes the conservation constraint part of the
+model rather than a post-processing step.
+
+\subsection{Precomputation}
+
+Before training, evaluate the initial condition on the projection grid and
+compute the reference invariants by the same quadrature rule used during
+training:
+\begin{equation}
+C_1 = \bm{q}^\top\bm{f},
+\qquad
+C_2 = \bm{q}^\top\Big[\bm{f}\odot\bm{f} + \mu(\bm{D}\bm{f})\odot(\bm{D}\bm{f})\Big],
+\qquad
+C_3 = \bm{q}^\top\Big[\bm{f}^{\odot3} + 3\,\bm{f}\odot\bm{f}\Big].
+\end{equation}
+Using the same quadrature for the reference values and for the constraints
+ensures the discrete constraints are exactly satisfiable.
+
+%==========================================================================
+\section{Summary: what is prior work and what is new}
+%==========================================================================
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{p{5.4cm} p{2.6cm} p{2.4cm} p{2.9cm}}
+\toprule
+Capability & PINN-Proj & SDIFP & \textbf{CE-PINN} \\
+\midrule
+$\int u\dx$ (linear)                      & Yes & Yes & Yes \\
+$\int u^2\dx$ (polynomial)                & Yes & Yes & Yes \\
+$\int(u^2+\mu u_x^2)\dx$ (derivative)     & \textbf{No} & \textbf{No} & \textbf{Yes} \\
+$\int(u^3-\tfrac12u_x^2)\dx$ (derivative) & \textbf{No} & \textbf{No} & Analysed; soft \\
+Hard Dirichlet boundary conditions        & No (Neumann only) & No (shifts boundary) & \textbf{Yes} \\
+Projection preserves BCs                  & --- & No & \textbf{Yes, structurally} \\
+Exact gradient through the projection     & Closed form & Closed form & \textbf{IFT + adjoint} \\
+Two-dimensional demonstration             & Advection only & High-$d$ linear & \textbf{KP} \\
+\bottomrule
+\end{tabular}
+\caption{Capability comparison. The rows in bold are the contribution of this
+work.}
+\end{table}
+
+\paragraph{The mathematical contribution, in one sentence.}
+Prior projections solve an \emph{algebraic} Euler--Lagrange equation, which is
+why their solution is an affine rescaling of the network output; the presence of
+a derivative term in the invariant turns the Euler--Lagrange equation into an
+\emph{elliptic boundary value problem}, and solving that problem, together with
+the $2\times2$ Newton system for its multipliers and the adjoint gradient it
+requires, is what this work adds.
+
+\paragraph{Relationship to prior work.}
+By Proposition \ref{prop:limit}, setting $\lambda_2 = 0$ recovers PINN-Proj's
+linear projection exactly, and letting $\mu\to0$ recovers the joint affine
+projection of PINN-Proj and SDIFP. Existing methods are the degenerate case of
+the present method in which the elliptic term is absent.
+
+\end{document}
