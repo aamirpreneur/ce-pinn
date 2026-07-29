@@ -256,7 +256,12 @@ class GridTrainer:
             loss_pde = loss_pde + (r[skip:-skip] ** 2).mean()
             if lam_soft_i3 > 0:
                 _, _, I3 = self._invariants(u)
-                loss_i3 = loss_i3 + ((I3 - self.C3_ref) / self.C3_ref) ** 2
+                # Relative penalty so the weight does not have to absorb the
+                # scale of C3, guarded because C3 can legitimately vanish for
+                # some initial data (it is 0.2, 2.58 and 6.6 in the present
+                # test problems, but nothing forces it to be non-zero).
+                scale = abs(self.C3_ref) + 1e-12
+                loss_i3 = loss_i3 + ((I3 - self.C3_ref) / scale) ** 2
 
         loss_pde = loss_pde / n_t
         total = loss_pde + lam_soft_i3 * loss_i3 / n_t

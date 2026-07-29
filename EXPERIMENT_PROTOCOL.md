@@ -62,6 +62,7 @@ listed here changed no numbers.
 | 2026-07-29 | Boundary tangent `g_a'(t)`, `g_b'(t)` | yes | nothing — no experiment uses time-varying boundary data |
 | 2026-07-29 | Three audit passes on the derivations document | no | nothing |
 | 2026-07-29 | Push-cell token check, `.gitignore` fix, provenance stamp | no | nothing |
+| 2026-07-29 | Soft-I3 denominator guarded against `C3 = 0` | yes | nothing — only reachable for `ce_full`, and `C3` is 0.2 / 2.58 / 6.6 in all three test problems, so no run could have divided by zero |
 
 ## Queued for exp-v2
 
