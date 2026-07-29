@@ -519,9 +519,22 @@ def ic_torch(x):
 exact_at_T = None      # no closed form
 
 # Non-homogeneous Dirichlet data: this is the case that breaks the affine
-# projection. Both are constant in time here.
-GA_FN = lambda t: U0
-GB_FN = lambda t: 0.0
+# projection. Both are constant in time.
+#
+# The values come from the initial condition rather than from the nominal u0.
+# tanh has not quite saturated at x = -36, where (x-xc)/d = -7.2, so the
+# initial condition gives 0.09999994 and not 0.1. Hardcoding 0.1 makes
+# f(a) != g_a(0), breaking the compatibility condition the hard-BC layer needs:
+# the term (g_a(t) - g_a(0)) no longer vanishes at t = 0, and the represented
+# initial condition is perturbed by about 1e-7 relative to the one the
+# reference invariants were computed from. Taking both from the initial
+# condition keeps the layer, the projection targets and the boundary data
+# mutually consistent. The trainer already defaults to exactly this when no
+# boundary functions are supplied, so they are simply omitted below.
+GA_VAL = float(ic_np(np.array([XA]))[0])
+GB_VAL = float(ic_np(np.array([XB]))[0])
+print(f'boundary data from IC: g_a={GA_VAL:.8f} (nominal u0={U0}), '
+      f'g_b={GB_VAL:.3e}')
 
 _q = trapezoid_weights(N_GRID, (XB - XA) / (N_GRID - 1))
 _ic = ic_torch(torch.linspace(XA, XB, N_GRID))
@@ -545,7 +558,7 @@ else:
 config = dict(equation=EQUATION, eps=EPS, mu=MU, xa=XA, xb=XB, T=T_FINAL,
               ic_fn=ic_np, n_grid=N_GRID, n_t=N_T, projection=projection,
               soft_ibc=soft_ibc, lam_ibc=10.0, C2_poly_ref=C2_POLY,
-              ga_fn=GA_FN, gb_fn=GB_FN, diag_every=LOG_EVERY)
+              diag_every=LOG_EVERY)
 
 print(f'{sum(p.numel() for p in model.parameters()):,} parameters, '
       f'projection={projection}')""",
