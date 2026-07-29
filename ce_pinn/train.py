@@ -314,12 +314,21 @@ class GridTrainer:
                      abs(float(u[-1]) - self._gb(t_val)))
         return drift, bc_err, u
 
-    def _log(self, phase, step, total, loss_total, loss_pde, loss_ibc):
+    def _track_best(self, loss_pde):
+        """Record a new minimum and checkpoint it. Called every step."""
+        if loss_pde < self.best_loss and not math.isnan(loss_pde):
+            self.best_loss = loss_pde
+            torch.save(self.model.state_dict(),
+                       os.path.join(self.out_dir, "model_best.pth"))
+
+    def _log(self, phase, step, total, loss_total, loss_pde, loss_ibc, lr=None):
         self.global_step += 1
         e = {'global_step': self.global_step, 'phase': phase, 'step': step,
              'loss_total': loss_total, 'loss_pde': loss_pde}
         if loss_ibc:
             e['loss_ibc'] = loss_ibc
+        if lr is not None:
+            e['lr'] = lr
         if self.global_step % self.cfg.get('diag_every', 20) == 0:
             drift, bc_err, _ = self._diagnostics(self.cfg['T'] / 2.0)
             e.update(I1_drift=drift[0], I2_drift=drift[1], I3_drift=drift[2],
@@ -327,11 +336,10 @@ class GridTrainer:
         self.history.append(e)
         if self.use_wandb:
             wandb.log({k: v for k, v in e.items() if k != 'phase'})
-        if loss_pde < self.best_loss and not math.isnan(loss_pde):
-            self.best_loss = loss_pde
-            torch.save(self.model.state_dict(),
-                       os.path.join(self.out_dir, "model_best.pth"))
+        self._track_best(loss_pde)
         msg = f"[{phase} {step}/{total}] total={loss_total:.6e} pde={loss_pde:.6e}"
+        if lr is not None:
+            msg += f" lr={lr:.2e}"
         if self._newton_failures:
             msg += f" newton_fail={self._newton_failures}"
         if self._newton_clamped:
@@ -344,16 +352,51 @@ class GridTrainer:
     # optimisation
     # ------------------------------------------------------------------
 
-    def train_adam(self, n_iter, lr=1e-3, lam_soft_i3=0.0, log_every=100):
+    def train_adam(self, n_iter, lr=1e-3, lam_soft_i3=0.0, log_every=100,
+                   lr_final=None):
+        """Adam with a cosine schedule from `lr` down to `lr_final`.
+
+        A constant rate does not settle. Adam normalises by gradient RMS, so it
+        keeps moving about `lr` per step in parameter space no matter how small
+        the gradients have become, and the residual then oscillates instead of
+        converging. Measured on a reduced RLW1 (tests/diag_lr_stability.py),
+        over 2500 steps from an identical initialisation:
+
+            constant 1e-3        best 2.49e-08   final 4.01e-07   2 clamp events
+            cosine 1e-3 -> 1e-5  best 1.12e-08   final 3.11e-08   0 clamp events
+
+        The constant run spikes to 2.8e-06 and never settles; the cosine run
+        descends monotonically and ends 13x lower. The full-scale run showed the
+        same failure, reaching 1.68e-08 at step 3600 and then degrading to
+        2.79e-06.
+
+        The clamp counts are the tell. Newton hits its well-posedness bound only
+        when the optimiser has thrown the network somewhere bad, so a schedule
+        that stops throwing removes those events entirely. The clamp was a
+        symptom, not the cause.
+
+        Pass `lr_final=lr` to recover the old constant behaviour.
+        """
+        if lr_final is None:
+            lr_final = lr * 1e-2
         opt = torch.optim.Adam(self.model.parameters(), lr=lr)
         for step in range(1, n_iter + 1):
+            frac = (step - 1) / max(n_iter - 1, 1)
+            cur = lr_final + 0.5 * (lr - lr_final) * (1.0 + math.cos(math.pi * frac))
+            for g in opt.param_groups:
+                g['lr'] = cur
             opt.zero_grad()
             total, lp, li = self._loss(lam_soft_i3)
             total.backward()
             opt.step()
+            # Track the minimum on every step, not only on logging steps.
+            # Otherwise `model_best.pth` is the best of every log_every-th
+            # step, which with log_every=200 can miss the real minimum by a
+            # wide margin on a run that oscillates.
+            self._track_best(float(lp))
             if step % log_every == 0 or step == 1:
                 self._log('Adam', step, n_iter, float(total.detach()), float(lp),
-                          float(li))
+                          float(li), lr=cur)
         self._save_history()
 
     def train_lbfgs(self, n_iter, lr=1.0, lam_soft_i3=0.0, log_every=20):

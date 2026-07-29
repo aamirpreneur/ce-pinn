@@ -63,13 +63,16 @@ listed here changed no numbers.
 | 2026-07-29 | Three audit passes on the derivations document | no | nothing |
 | 2026-07-29 | Push-cell token check, `.gitignore` fix, provenance stamp | no | nothing |
 | 2026-07-29 | Soft-I3 denominator guarded against `C3 = 0` | yes | nothing — only reachable for `ce_full`, and `C3` is 0.2 / 2.58 / 6.6 in all three test problems, so no run could have divided by zero |
+| 2026-07-29 | Cosine LR schedule in `train_adam`; `best_loss` tracked every step | yes | **everything** — this is exp-v3. No full run had completed, so nothing real is lost |
+| 2026-07-29 | Adam budget 20000 -> 5000 (6000 for the two-soliton cases), L-BFGS 2000 -> 500 | config only | all runs must use one budget to be comparable |
 
-## Queued for exp-v2
+## Queued for a later version
 
-Findings raised while `exp-v1` is running. Not applied, so nothing in the
-current batch shifts underneath it.
-
-**Adjoint is inconsistent when the lam2 clamp binds.** When `lam2` sits on its
+**Adjoint is inconsistent when the lam2 clamp binds.** Measured and downgraded:
+with the cosine schedule the clamp does not fire at all (0 events against 2 for
+the constant schedule over 2500 steps), and near convergence `lam2` reaches
+only about 1e-05 against a bound at -1.4e-02. The clamp turned out to be a
+symptom of optimiser instability rather than a cause of it. When `lam2` sits on its
 lower bound it is held there rather than determined by `F2 = 0`, so
 `dlam2/du~ = 0`. The backward pass nonetheless applies the full rank-2
 projector `Pi = P J^-1 R^T`, which assumes both multipliers respond. The
