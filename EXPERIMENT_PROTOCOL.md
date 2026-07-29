@@ -63,6 +63,27 @@ listed here changed no numbers.
 | 2026-07-29 | Three audit passes on the derivations document | no | nothing |
 | 2026-07-29 | Push-cell token check, `.gitignore` fix, provenance stamp | no | nothing |
 
+## Queued for exp-v2
+
+Findings raised while `exp-v1` is running. Not applied, so nothing in the
+current batch shifts underneath it.
+
+**Adjoint is inconsistent when the lam2 clamp binds.** When `lam2` sits on its
+lower bound it is held there rather than determined by `F2 = 0`, so
+`dlam2/du~ = 0`. The backward pass nonetheless applies the full rank-2
+projector `Pi = P J^-1 R^T`, which assumes both multipliers respond. The
+correct treatment on a clamped step is a rank-1 projector using `lam1` alone.
+
+*Reach:* numerical, but does **not** invalidate a completed run. The clamp
+binds on roughly 0.25% of projections, all in early training, and the effect is
+a slightly wrong descent direction on those steps rather than an error in any
+reported quantity. Everything reported comes from the forward projection, which
+is exact whether or not the clamp was active, and the run records
+`newton_clamped` so the frequency is auditable per run.
+
+*Fix:* in `_HelmholtzApply.backward` and `project_tangent`, drop the `lam2`
+column from `P` and `R` when `st.clamped` is set.
+
 ## Known gaps, carried deliberately
 
 **RLW3 conservation targets.** The bore injects mass at the left boundary at

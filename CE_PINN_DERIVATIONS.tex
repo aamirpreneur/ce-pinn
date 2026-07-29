@@ -418,6 +418,10 @@ Constraint: $\displaystyle\int (\us)^2 \dx = C_2$.
 \boxed{\ \us(x) = \ut(x)\,\sqrt{\frac{C_2}{\int \ut^2 \dx}}. \ }
 \label{eq:proj-quad}
 \end{equation}
+The positive root is the one taken. The negative root also solves the
+stationarity condition, but it flips the sign of $\us$ and is the farther of
+the two points from $\ut$. The same choice applies to
+$\alpha = +\sigma_0/\tilde\sigma$ in the joint case below.
 A pure rescaling. Note this destroys $\int\us\dx = C_1$ unless $C_1 = 0$.
 
 \subsection{Case C: both constraints jointly (PINN-Proj Eq.~16--17; SDIFP Eq.~4.2)}
@@ -758,6 +762,24 @@ $\us = (\ut-\lambda_1/2)/(1+\lambda_2)$, the affine map \eqref{eq:joint-form} of
 prior work.
 \end{proposition}
 
+\begin{remark}[$\lambda_2 = 0$ is a singular limit under strong Dirichlet data]
+The reduction in Proposition \ref{prop:limit} is a statement about the interior.
+With the boundary values imposed strongly it needs care. At $\lambda_2 = 0$ the
+equation gives $\us = \ut - \lambda_1/2$ in the interior while still requiring
+$\us(a) = g_a$; since Layer 1 already delivers $\ut(a) = g_a$, continuity would
+force $g_a = g_a - \lambda_1/2$, hence $\lambda_1 = 0$. A non-zero mass
+correction and continuous boundary data are therefore incompatible at
+$\lambda_2 = 0$.
+
+Discretely the solve still returns a vector, with the shift applied to the
+interior and the boundary nodes pinned, so the profile carries a jump of
+$\lambda_1/2$ across the first cell. For $\lambda_2 > 0$ no jump appears: the
+elliptic term spreads the correction over a boundary layer of width
+$\sqrt{\kappa}$, which is exactly what the operator is for. The limit is benign
+in practice because $\lambda_2 = 0$ arises only when $I_2[\ut]$ already matches
+$C_2$, and then $\lambda_1 = 0$ as well.
+\end{remark}
+
 \noindent
 Proposition \ref{prop:limit} states the relationship of this work to the
 literature: existing projections are the degenerate case in which the elliptic
@@ -834,6 +856,26 @@ The Helmholtz projection is best understood as a \emph{smoothing} projection.
 
 Note also that $\lambda_2 = -1$ must be excluded outright, since the normalised
 form \eqref{eq:helm-normalised} divides by $1+\lambda_2$.
+\end{remark}
+
+\begin{remark}[Feasibility from below]
+There is a limit at the other end too. With the boundary values and the mass
+fixed, the attainable values of $I_2$ are bounded below by
+\begin{equation}
+C_2^{\min}
+= \min_{w}\int_\Om\big(w^2+\mu w_x^2\big)\dx
+\quad\text{s.t.}\quad
+\int_\Om w\dx = C_1,\ \ w(a)=g_a,\ \ w(b)=g_b ,
+\end{equation}
+and no projection exists for $C_2 < C_2^{\min}$. This bound is strictly larger
+than the Cauchy--Schwarz value $C_1^2/|\Om|$ that governs the polynomial case,
+because the Dirichlet data and the $\mu\int w_x^2$ penalty both add to it.
+
+In the present setting the question does not arise: $C_2$ is computed from the
+initial condition, which satisfies the same boundary values and mass, so the
+target is attained by construction. It would matter if targets were prescribed
+independently of the data, for instance the time-dependent $C_1(t)$, $C_2(t)$
+that a non-vanishing boundary flux calls for (Remark \ref{rem:bore-flux}).
 \end{remark}
 
 \begin{remark}[Boundary conditions are preserved exactly]
@@ -1377,10 +1419,17 @@ One derivation therefore serves both directions.
 
 \subsection{Obtaining the raw tangent}
 
-The quantity $\mathrm d\ut/\mathrm dt$ is ordinary automatic differentiation.
-Both the network $N(x,t;\theta)$ and the hard-BC layer \eqref{eq:hardbc} act
-pointwise in $t$, so $\partial\ut_i/\partial t_j = 0$ for $i \neq j$ and a
-single reverse-mode pass with $\bm 1$ as the seed returns the entire vector.
+The quantity $\mathrm d\ut/\mathrm dt$ is ordinary automatic differentiation,
+provided the time coordinate is carried as a \emph{vector}
+$\bm t = (t,\dots,t)^\top \in \R^N$ rather than a single shared scalar. Both the
+network $N(x,t;\theta)$ and the hard-BC layer \eqref{eq:hardbc} act pointwise,
+so $\partial\ut_i/\partial t_j = 0$ for $i \neq j$, the Jacobian is diagonal,
+and one reverse-mode pass seeded with $\bm 1$ returns
+$\big(\partial\ut_i/\partial t_i\big)_i$, the whole vector.
+
+With a single scalar $t$ the same pass would return $\sum_i \partial\ut_i/\partial t$,
+a scalar, and recovering the vector would need either $N$ reverse passes or one
+forward-mode pass. Repeating $t$ across the grid avoids that entirely.
 The coupling is introduced only by the projection, and \eqref{eq:tangent}
 accounts for it.
 
@@ -1414,12 +1463,28 @@ so the RLW residual needs no additional solves. Evaluating
 $2\times2$ solve, and $O(N)$ vector arithmetic: the same as the backward pass.
 
 \begin{remark}[Which dependence is differentiated through]
-In \eqref{eq:tangent} the state $(\bm{A},\bm{P},\bm{R},\bm{J},\lambda_2)$ is
-evaluated at the current $\ut$ and then held fixed when the residual is
-differentiated with respect to $\theta$. The tangent itself is exact; what is
-dropped is the second-order dependence of the Jacobian on $\ut$. This is the
-usual frozen-Jacobian treatment, and it affects the parameter gradient only at
-second order.
+\label{rem:frozen}
+Equation \eqref{eq:tangent} is exact for $\mathrm d\us/\mathrm dt$. The question
+is what happens when the residual built from it is differentiated with respect
+to $\theta$.
+
+The state $(\bm{A},\bm{P},\bm{R},\bm{J},\lambda_2)$ is evaluated at the current
+$\ut$ and then held fixed. The exact derivative would carry the extra term
+\begin{equation}
+\frac{\partial}{\partial\theta}\Big[(\bm{I}-\bm\Pi)\bm{M}\Big]\,\ut_t ,
+\end{equation}
+which involves mixed second derivatives of the projection map, in $\ut$ and in
+$\theta$. It is worth being precise about what dropping it costs. The term is a
+\emph{second derivative of the projection}, but it enters the \emph{first-order}
+gradient of the loss: it is not a higher-order correction that vanishes as
+training converges. The honest statement is that the computed gradient is exact
+for a residual defined with the Jacobian frozen, and approximate for the fully
+differentiated residual.
+
+This is the standard frozen-Jacobian, or semi-implicit, treatment and is what
+the implementation does. The gradient of $\us$ with respect to $\ut$
+(Section~\ref{sec:backward}) is exact and carries no such caveat; only the
+tangent path does.
 \end{remark}
 
 \begin{remark}[Why this matters for the method]
@@ -1602,6 +1667,22 @@ pins the solution there.
 Layer 1 makes the initial and boundary conditions exact. Layer 2 makes $C_1$ and
 $C_2$ exact. Both hold for every $\theta$, at every training step, and at
 inference.
+
+The two layers compose without conflict \emph{when Layer 2 is the Helmholtz
+projection}, because the Dirichlet data is part of its boundary value problem.
+They do not compose when Layer 2 is the affine projection, which is the path
+taken for the polynomial invariants of KdV and KP: there
+$\us(a) = \alpha g_a + \beta$ with $\beta = m_0 - \alpha\tilde m$, which is not
+$g_a$ in general. On that path Layer 2 should be read as an interior
+conservation projection that gives up the boundary data Layer 1 established,
+not as a boundary-preserving one. This is visible in practice: the same run
+that holds $\int u^2$ to $5\times10^{-16}$ leaves a boundary error of about
+$2\times10^{-2}$.
+
+Restoring both would mean restricting the affine map to interior nodes and
+solving modified moment equations with $\us_1 = g_a$, $\us_N = g_b$ held fixed.
+That is a different projection from the one in the literature, so it is not
+used here: the affine path exists to reproduce prior work as a baseline.
 
 \subsection{Loss}
 
