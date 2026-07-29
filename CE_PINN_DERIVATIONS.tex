@@ -151,6 +151,10 @@ C_1 &= \iint u \dx\dy, \\
 C_2 &= \iint u^2 \dx\dy, \\
 H &= \iint \Big[-u^3 + \tfrac12 u_x^2 + \tfrac32 \big(\partial_x^{-1}u_y\big)^2\Big]\dx\dy .
 \end{align}
+The sign of the nonlocal term in $H$ is tied to the convention $\sigma = -3$
+used here; KP sign conventions differ across the literature, so $H$ should be
+re-derived if \eqref{eq:kp} is written differently.
+
 The lump solution for $\sigma=-3$ is
 \begin{equation}
 u(x,y,t) = \frac{4\big(-\xi^2 + y^2 + 1\big)}{\big(\xi^2+y^2+1\big)^2},
@@ -507,9 +511,11 @@ sign of the root by taking the positive branch, which keeps $\us$ aligned with
 $\ut$. Equation \eqref{eq:proj-joint} requires $\tilde\sigma > 0$, so $\ut$
 must not be constant, and $\sigma_0^2 = C_2/|\Om| - m_0^2 \geq 0$, which is the
 feasibility condition $C_2 \geq C_1^2/|\Om|$ (Cauchy--Schwarz, with equality
-only for constant $\us$). If $\tilde\sigma = \sigma_0 = 0$ the map is $0/0$ and
-should be read as the identity. Implementations clamp both variances away from
-zero.
+only for constant $\us$). If $\tilde\sigma = 0$ but $\sigma_0 > 0$ the target is
+simply unreachable: a constant network output cannot be rescaled into one with
+positive variance. If $\tilde\sigma = \sigma_0 = 0$ the map is $0/0$ and should
+be read as the identity when the mass constraint already holds, and as the
+constant $m_0$ otherwise. Implementations clamp both variances away from zero.
 \end{remark}
 
 %==========================================================================
@@ -525,15 +531,22 @@ I_2[\us] = \int \Big[(\us)^2 + \mu(\us_x)^2\Big]\dx = C_2 .
 
 \begin{proposition}[The optimal projection is not affine]
 \label{prop:not-affine}
-Let $\mu > 0$, and let $\ut$ be such that $\ut$ and $\ut_{xx}$ are linearly
-independent on $\Om$. Then the minimiser of $\int(\us-\ut)^2\dx$ subject to
+Let $\mu > 0$, and let $1$, $\ut$ and $\ut_{xx}$ be linearly independent on
+$\Om$. Then the minimiser of $\int(\us-\ut)^2\dx$ subject to
 $\int\us\dx = C_1$ and $\int[(\us)^2+\mu(\us_x)^2]\dx = C_2$ has the form
-$\us = \alpha\ut + \beta$ with constants $\alpha,\beta$ \emph{only if} the
-second constraint is inactive.
+$\us = \alpha\ut + \beta$ with constants $\alpha,\beta$ \emph{only if}
+$\lambda_2 = 0$.
 
-The independence hypothesis is generic but not automatic. It fails when
-$\ut_{xx} = a\ut + b$ for constants $a, b$, in which case an affine minimiser
-can occur with $\lambda_2 \neq 0$.
+All three functions are needed in the hypothesis, because the substitution
+below leaves a constant term alongside $\ut$ and $\ut_{xx}$; independence of
+the pair alone would not isolate the $\ut_{xx}$ coefficient. The hypothesis is
+generic but not automatic, and fails exactly when $\ut_{xx} = a\ut + b$ for
+constants $a,b$, in which case an affine minimiser can occur with
+$\lambda_2 \neq 0$.
+
+We state the conclusion as $\lambda_2 = 0$ rather than ``the constraint is
+inactive''. An equality constraint can be satisfied and still carry a zero
+multiplier; the operative fact is that the elliptic term disappears.
 \end{proposition}
 
 \begin{proof}
@@ -786,6 +799,14 @@ $|\kappa| < \Delta x^2/4$, that is
 \qquad \kappa_{\min} = -\tfrac{1}{4}\Delta x^2 .
 \label{eq:lam2min}
 \end{equation}
+Two conditions must be kept apart here. The continuous second-order optimality
+condition is $\lambda_2 \geq 0$: only on that branch is the stationary point a
+genuine minimiser. The bound \eqref{eq:lam2min} is weaker and permits a small
+negative range; it is a \emph{discrete solvability} condition, the largest
+$|\kappa|$ for which the grid operator stays positive definite, and a solution
+obtained there should be read as a numerical fallback rather than as a
+continuous minimiser.
+
 The implementation clamps $\lambda_2$ at \eqref{eq:lam2min} (with a safety
 factor) and records when the clamp binds, which is the honest reading: the
 target is not attainable by an elliptic projection on that grid. In practice
@@ -1270,14 +1291,93 @@ which is evaluated in four steps:
 \begin{remark}[Transpose, not inverse]
 $\bm{A}$ in \eqref{eq:matrixA} is symmetric in its interior but \emph{not}
 overall, because the boundary rows are $(1,0,\dots)$ and $(\dots,0,1)$ while the
-adjacent columns retain $-c$. Step 4 must therefore solve with $\bm{A}^\top$,
-which is again tridiagonal (with sub- and super-diagonal $-c$ in every position
-and diagonal $(1, 1+2c, \dots, 1+2c, 1)$), so the cost is unchanged.
+adjacent columns retain $-c$. Step 4 must therefore solve with the genuine
+transpose. Taking $(\bm{A}^\top)_{ij} = \bm{A}_{ji}$, the two zero entries move
+diagonally:
+\begin{equation}
+(\bm{A}^\top)_{1,2} = -c,\quad (\bm{A}^\top)_{2,1} = 0,
+\qquad
+(\bm{A}^\top)_{N,N-1} = -c,\quad (\bm{A}^\top)_{N-1,N} = 0 .
+\end{equation}
+So $\bm{A}^\top$ is tridiagonal with diagonal $(1, 1+2c,\dots,1+2c, 1)$ and
+$-c$ in every off-diagonal position \emph{except} $(\bm{A}^\top)_{2,1}$ and
+$(\bm{A}^\top)_{N-1,N}$, which are zero. Filling those in would make the matrix
+symmetric and feed the boundary residuals back into the interior incorrectly.
+The cost is unchanged. In practice the safe implementation transposes the
+assembled matrix rather than rebuilding it from this description.
 \end{remark}
 
 The backward pass requires one tridiagonal solve, one $2\times2$ solve, and
 $O(N)$ vector arithmetic. It is no more expensive than the naive frozen-$\lambda$
 version, and it is exact.
+
+%==========================================================================
+\section{Time derivative of the projected field \textbf{[NEW]}}
+\label{sec:tangent}
+%==========================================================================
+
+Everything so far is stated at a fixed time level, which is correct for a
+spatial projection but not yet enough for a PDE residual. The RLW residual
+$r = u_t + u_x + \varepsilon uu_x - \mu u_{xxt}$ and the KdV residual
+$r = u_t + 6uu_x + u_{xxx}$ both need the time derivative of the
+\emph{projected} field, and $\us$ depends on $t$ through $\ut$ in a way that
+couples the whole grid.
+
+\subsection{The tangent is the same operator as the backward pass}
+
+Write the projection as a map $\us(t) = \mathcal{P}\big[\ut(\cdot,t)\big]$.
+Differentiating in $t$ by the chain rule, and using \eqref{eq:full-jac},
+\begin{equation}
+\boxed{\
+\frac{\mathrm d\bm{\us}}{\mathrm dt}
+= \frac{\partial\bm{\us}}{\partial\ut}\,\frac{\mathrm d\ut}{\mathrm dt}
+= \big(\bm{I}-\bm\Pi\big)\bm{M}\,\frac{\mathrm d\ut}{\mathrm dt}. \ }
+\label{eq:tangent}
+\end{equation}
+This is exact, not an approximation: it is the ordinary chain rule with the
+Jacobian evaluated at $\ut(\cdot,t)$. The backward pass applies
+$\big[(\bm I-\bm\Pi)\bm M\big]^\top$; the tangent applies the operator itself.
+One derivation therefore serves both directions.
+
+\subsection{Obtaining the raw tangent}
+
+The quantity $\mathrm d\ut/\mathrm dt$ is ordinary automatic differentiation.
+Both the network $N(x,t;\theta)$ and the hard-BC layer \eqref{eq:hardbc} act
+pointwise in $t$, so $\partial\ut_i/\partial t_j = 0$ for $i \neq j$ and a
+single reverse-mode pass with $\bm 1$ as the seed returns the entire vector.
+The coupling is introduced only by the projection, and \eqref{eq:tangent}
+accounts for it.
+
+\subsection{Higher derivatives and cost}
+
+Spatial derivatives of the tangent follow from the fixed difference matrices,
+since $\partial_t$ and $\partial_x$ commute:
+\begin{equation}
+\big(\us_{xx}\big)_t = \bm{D}_2\,\frac{\mathrm d\bm{\us}}{\mathrm dt},
+\end{equation}
+so the RLW residual needs no additional solves. Evaluating
+\eqref{eq:tangent} costs one solve with $\bm{A}$ (not $\bm{A}^\top$), one
+$2\times2$ solve, and $O(N)$ vector arithmetic: the same as the backward pass.
+
+\begin{remark}[Which dependence is differentiated through]
+In \eqref{eq:tangent} the state $(\bm{A},\bm{P},\bm{R},\bm{J},\lambda_2)$ is
+evaluated at the current $\ut$ and then held fixed when the residual is
+differentiated with respect to $\theta$. The tangent itself is exact; what is
+dropped is the second-order dependence of the Jacobian on $\ut$. This is the
+usual frozen-Jacobian treatment, and it affects the parameter gradient only at
+second order.
+\end{remark}
+
+\begin{remark}[Why this matters for the method]
+Prior projections avoid this issue by construction. PINN-Proj's correction is
+$\us = \ut + \varkappa(t)$ and the affine projection is
+$\us = \alpha(t)\ut + \beta(t)$; in both, the $t$-dependence sits in one or two
+scalars, so ordinary automatic differentiation handles $\partial_t\us$ with no
+extra machinery. The Helmholtz projection is a global operator on the grid, so
+the tangent has to be propagated explicitly. That is the price of handling
+derivative-dependent invariants, and \eqref{eq:tangent} shows it is a small
+one.
+\end{remark}
 
 %==========================================================================
 \section{Cost analysis \textbf{[NEW]}}
@@ -1442,8 +1542,18 @@ C_1 = \bm{q}^\top\bm{f},
 \qquad
 C_2 = \bm{q}^\top\Big[\bm{f}\odot\bm{f} + \mu(\bm{D}\bm{f})\odot(\bm{D}\bm{f})\Big],
 \qquad
-C_3 = \bm{q}^\top\Big[\varepsilon\,\bm{f}^{\odot3} + 3\,\bm{f}\odot\bm{f}\Big].
+C_3 = \bm{q}^\top\Big[\varepsilon\,\bm{f}^{\odot3} + 3\,\bm{f}\odot\bm{f}\Big]
+\qquad\text{(RLW).}
 \end{equation}
+The third invariant is equation-specific. For KdV,
+\begin{equation}
+C_3 = \bm{q}^\top\Big[\bm{f}^{\odot3}
+      - \tfrac12(\bm{D}\bm{f})\odot(\bm{D}\bm{f})\Big]
+\qquad\text{(KdV)},
+\end{equation}
+and for KP the corresponding Hamiltonian additionally carries the nonlocal
+term $\tfrac32(\partial_x^{-1}u_y)^2$, which needs an auxiliary variable
+$v$ with $v_x = u_y$ and is not enforced here.
 Using the same quadrature for the reference values and for the constraints
 ensures the discrete constraints are exactly satisfiable.
 
@@ -1469,7 +1579,11 @@ Two-dimensional demonstration             & Advection only & High-$d$ linear & \
 \bottomrule
 \end{tabular}
 \caption{Capability comparison. The rows in bold are the contribution of this
-work.}
+work. ``Projection preserves BCs'' refers to the Helmholtz projection, where
+the Dirichlet data enters as part of the elliptic boundary value problem. The
+affine projection does not preserve non-homogeneous Dirichlet data, and
+preserves homogeneous data only when $\beta = 0$; that applies equally to the
+polynomial path of the present method when it is used on KdV and KP.}
 \end{table}
 
 \paragraph{The mathematical contribution, in one sentence.}
