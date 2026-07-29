@@ -150,18 +150,34 @@ def _push():
         return
 
     os.chdir('/kaggle/working/repo')
-    ts = datetime.datetime.utcnow().strftime('%Y%m%d-%H%M%S')
+    ts = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d-%H%M%S')
     dest = f'results/{{RUN_NAME}}/{{ts}}'
     os.makedirs(dest, exist_ok=True)
+    copied = 0
     for fl in os.listdir(f'/kaggle/working/{{OUT_DIR}}'):
         shutil.copy2(f'/kaggle/working/{{OUT_DIR}}/{{fl}}', dest)
-    subprocess.run(['git', 'add', '-A', 'results'])
-    subprocess.run(['git', 'commit', '-m', f'results({{RUN_NAME}}/{{ts}})'])
+        copied += 1
+    print(f'copied {{copied}} files into {{dest}}')
+
+    add = subprocess.run(['git', 'add', '-A', 'results'], capture_output=True)
+    # `git add` succeeds even when .gitignore swallows every path, so confirm
+    # something is actually staged before claiming the run was archived.
+    if subprocess.run(['git', 'diff', '--cached', '--quiet']).returncode == 0:
+        print('Nothing was staged. Most likely .gitignore excludes results/.')
+        err = add.stderr.decode(errors='replace').strip()
+        if err:
+            print(err[:400])
+        print(f'Results remain in /kaggle/working/{{OUT_DIR}} (Output tab).')
+        return
+
+    subprocess.run(['git', 'commit', '-m', f'results({{RUN_NAME}}/{{ts}})'],
+                   capture_output=True)
     p = subprocess.run(['git', 'push', 'origin', 'main'], capture_output=True)
     if p.returncode == 0:
         print('Pushed to', dest)
     else:
-        print('Push failed (details suppressed).')
+        print('Push failed:',
+              p.stderr.decode(errors='replace').replace(token, '***')[:400])
         print(f'Results remain in /kaggle/working/{{OUT_DIR}} (Output tab).')
 
 _push()"""

@@ -1,4 +1,8 @@
 __pycache__/
 *.pyc
 tests/_tmp/
-results/
+tests/_nbtmp/
+
+# results/ is deliberately NOT ignored. The push cell archives run outputs
+# there, and ignoring it made `git add -A results` a silent no-op on Kaggle:
+# the cell reported success while committing nothing.
