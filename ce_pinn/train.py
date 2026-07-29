@@ -1,13 +1,30 @@
-"""Training loop for CE-PINN with W&B logging and proper checkpointing."""
+"""Grid-based trainer for CE-PINN.
+
+The conservation projection is a global operation on a spatial grid, so the PDE
+residual is evaluated on that same grid rather than at scattered points. Each
+training step samples `n_t` time levels; at every level the network is
+evaluated on the full spatial grid, the hard boundary layer is applied, the
+projection is applied, and the residual is formed **on the projected field**.
+That is what makes conservation part of the model rather than a post-processing
+step.
+
+Derivatives:
+  * spatial derivatives come from the fourth-order finite-difference operators
+    in `operators.py`;
+  * the time derivative of the raw field is ordinary automatic differentiation
+    (the network is pointwise in t, so one backward pass gives the whole
+    vector);
+  * the time derivative of the *projected* field follows from the chain rule,
+    d(u*)/dt = (dP/du~) du~/dt, applied by `project_tangent`.
+"""
 import os
 import json
-import time
 import math
 import torch
 import numpy as np
-from . import projection as proj
 
-_trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
+from . import projection as proj
+from .operators import GridOps
 
 try:
     import wandb
@@ -15,334 +32,326 @@ try:
 except ImportError:
     HAS_WANDB = False
 
-
-def latin_hypercube_2d(n, bounds):
-    rng = np.random.default_rng()
-    samples = np.zeros((n, 2))
-    for j in range(2):
-        perm = rng.permutation(n)
-        samples[:, j] = (perm + rng.uniform(size=n)) / n
-    lo = np.array([bounds[0], bounds[2]])
-    hi = np.array([bounds[1], bounds[3]])
-    return samples * (hi - lo) + lo
+_trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
 
 
-def latin_hypercube_3d(n, bounds):
-    rng = np.random.default_rng()
-    samples = np.zeros((n, 3))
-    for j in range(3):
-        perm = rng.permutation(n)
-        samples[:, j] = (perm + rng.uniform(size=n)) / n
-    lo = np.array([bounds[0], bounds[2], bounds[4]])
-    hi = np.array([bounds[1], bounds[3], bounds[5]])
-    return samples * (hi - lo) + lo
+class GridTrainer:
+    """CE-PINN trainer with grid collocation and hard conservation."""
 
-
-def pde_residual_kdv(model, x, t):
-    x.requires_grad_(True)
-    t.requires_grad_(True)
-    u = model(x, t)
-    u_x, u_t = torch.autograd.grad(u, [x, t], grad_outputs=torch.ones_like(u),
-                                    create_graph=True)
-    u_xx = torch.autograd.grad(u_x, x, grad_outputs=torch.ones_like(u_x),
-                               create_graph=True)[0]
-    u_xxx = torch.autograd.grad(u_xx, x, grad_outputs=torch.ones_like(u_xx),
-                                create_graph=True)[0]
-    return u_t + 6.0 * u * u_x + u_xxx
-
-
-def pde_residual_rlw(model, x, t, eps=1.0, mu=1.0):
-    x.requires_grad_(True)
-    t.requires_grad_(True)
-    u = model(x, t)
-    u_x = torch.autograd.grad(u, x, grad_outputs=torch.ones_like(u), create_graph=True)[0]
-    u_t = torch.autograd.grad(u, t, grad_outputs=torch.ones_like(u), create_graph=True)[0]
-    u_xt = torch.autograd.grad(u_x, t, grad_outputs=torch.ones_like(u_x), create_graph=True)[0]
-    u_xxt = torch.autograd.grad(u_xt, x, grad_outputs=torch.ones_like(u_xt), create_graph=True)[0]
-    return u_t + u_x + eps * u * u_x - mu * u_xxt
-
-
-def pde_residual_kp(model, x, y, t, sigma=-3.0):
-    x.requires_grad_(True)
-    y.requires_grad_(True)
-    t.requires_grad_(True)
-    u = model(x, y, t)
-    u_x = torch.autograd.grad(u, x, grad_outputs=torch.ones_like(u), create_graph=True)[0]
-    u_t = torch.autograd.grad(u, t, grad_outputs=torch.ones_like(u), create_graph=True)[0]
-    u_y = torch.autograd.grad(u, y, grad_outputs=torch.ones_like(u), create_graph=True)[0]
-    u_xx = torch.autograd.grad(u_x, x, grad_outputs=torch.ones_like(u_x), create_graph=True)[0]
-    u_xxx = torch.autograd.grad(u_xx, x, grad_outputs=torch.ones_like(u_xx), create_graph=True)[0]
-    u_yy = torch.autograd.grad(u_y, y, grad_outputs=torch.ones_like(u_y), create_graph=True)[0]
-    inner = u_t + 6.0 * u * u_x + u_xxx
-    inner_x = torch.autograd.grad(inner, x, grad_outputs=torch.ones_like(inner), create_graph=True)[0]
-    return inner_x + sigma * u_yy
-
-
-class Trainer:
-    """CE-PINN trainer with W&B logging and proper checkpointing."""
-
-    def __init__(self, model, config, device='cpu', out_dir=None):
+    def __init__(self, model, config, device='cpu', out_dir='results'):
         self.model = model.to(device)
         self.device = device
-        self.config = config
-        self.out_dir = out_dir or os.environ.get("OUT_DIR", "results")
-        os.makedirs(self.out_dir, exist_ok=True)
+        self.cfg = config
+        self.out_dir = out_dir
+        os.makedirs(out_dir, exist_ok=True)
 
         self.history = []
         self.best_loss = float('inf')
         self.global_step = 0
-        self.use_wandb = HAS_WANDB and os.environ.get("WANDB_API_KEY")
+        self.use_wandb = HAS_WANDB and bool(os.environ.get("WANDB_API_KEY"))
+        self._lam_cache = None          # warm start for Newton
+        self._newton_failures = 0
 
-        self._setup_data()
+        eq = config['equation']
+        self.ops = GridOps(config['xa'], config['xb'], config['n_grid'],
+                           device=device, need_d3=(eq == 'kdv'))
+        self.x = self.ops.x
+        self.dx = self.ops.dx
+        self.q = self.ops.q
+        # second-order operator used *inside* the invariant, matched to the
+        # Helmholtz stencil so the discrete constraint is exactly attainable
+        self.D1c = proj.central_d1_matrix(config['n_grid'], self.dx,
+                                          device=device)
+
+        self._setup_bc()
         self._compute_reference_invariants()
         self._save_config()
 
-    def _save_config(self):
-        cfg = {k: v for k, v in self.config.items() if not callable(v)}
-        cfg['C1_ref'] = float(self.C1_ref)
-        cfg['C2_ref'] = float(self.C2_ref)
-        cfg['C3_ref'] = float(self.C3_ref)
-        cfg['device'] = str(self.device)
-        json.dump(cfg, open(os.path.join(self.out_dir, "config.json"), "w"), indent=2)
+    # ------------------------------------------------------------------
+    # setup
+    # ------------------------------------------------------------------
 
-    def _setup_data(self):
-        cfg = self.config
-        bounds = [cfg['xa'], cfg['xb'], 0.0, cfg['T']]
-        pts_pde = latin_hypercube_2d(cfg['n_pde'], bounds)
-        self.x_pde = torch.tensor(pts_pde[:, 0], dtype=torch.float64, device=self.device)
-        self.t_pde = torch.tensor(pts_pde[:, 1], dtype=torch.float64, device=self.device)
+    def _setup_bc(self):
+        cfg = self.cfg
+        ic_np = cfg['ic_fn'](self.x.cpu().numpy())
+        self.ic_vals = torch.tensor(ic_np, dtype=torch.float64,
+                                    device=self.device)
+        # Boundary values default to the initial condition evaluated at the
+        # ends. Hardcoding zero is wrong whenever the solution does not decay
+        # exactly to zero at the domain edge (and badly wrong for the bore).
+        self.ga_fn = cfg.get('ga_fn')
+        self.gb_fn = cfg.get('gb_fn')
+        self.ga0 = float(self.ic_vals[0])
+        self.gb0 = float(self.ic_vals[-1])
 
-        N_cons = cfg.get('n_conservation_grid', 256)
-        self.x_cons = torch.linspace(cfg['xa'], cfg['xb'], N_cons,
-                                     dtype=torch.float64, device=self.device)
-        self.dx_cons = (cfg['xb'] - cfg['xa']) / (N_cons - 1)
+    def _ga(self, t):
+        return float(self.ga_fn(t)) if self.ga_fn else self.ga0
 
-    def _compute_reference_invariants(self):
-        cfg = self.config
-        x_np = self.x_cons.cpu().numpy()
-        dx = self.dx_cons
-        ic_vals = cfg['ic_fn'](x_np)
-        ic_x = np.gradient(ic_vals, dx)
+    def _gb(self, t):
+        return float(self.gb_fn(t)) if self.gb_fn else self.gb0
 
+    def _invariants(self, u):
+        """Discrete (I1, I2, I3) using the same quadrature as the constraints."""
+        cfg = self.cfg
+        ux = torch.matmul(u, self.D1c.T)
+        I1 = torch.dot(self.q, u)
         if cfg['equation'] == 'rlw':
-            mu = cfg['mu']
-            self.C1_ref = float(_trapz(ic_vals, dx=dx))
-            self.C2_ref = float(_trapz(ic_vals**2 + mu * ic_x**2, dx=dx))
-            self.C3_ref = float(_trapz(ic_vals**3 + 3.0 * ic_vals**2, dx=dx))
+            I2 = torch.dot(self.q, u * u + cfg['mu'] * ux * ux)
+            I3 = torch.dot(self.q, u ** 3 + 3.0 * u * u)
         else:
-            self.C1_ref = float(_trapz(ic_vals, dx=dx))
-            self.C2_ref = float(_trapz(ic_vals**2, dx=dx))
-            self.C3_ref = float(_trapz(ic_vals**3 - 0.5 * ic_x**2, dx=dx))
-
-        print(f"Reference invariants: C1={self.C1_ref:.8f}, C2={self.C2_ref:.8f}, "
-              f"C3={self.C3_ref:.8f}")
-
-    def _compute_conservation_at_t(self, t_val):
-        """Compute I1, I2, I3 at a given time."""
-        t_vec = torch.full_like(self.x_cons, t_val)
-        with torch.no_grad():
-            u = self.model(self.x_cons, t_vec)
-        u_np = u.cpu().numpy()
-        ux_np = np.gradient(u_np, self.dx_cons)
-        dx = self.dx_cons
-
-        cfg = self.config
-        if cfg['equation'] == 'rlw':
-            mu = cfg['mu']
-            I1 = float(_trapz(u_np, dx=dx))
-            I2 = float(_trapz(u_np**2 + mu * ux_np**2, dx=dx))
-            I3 = float(_trapz(u_np**3 + 3.0 * u_np**2, dx=dx))
-        else:
-            I1 = float(_trapz(u_np, dx=dx))
-            I2 = float(_trapz(u_np**2, dx=dx))
-            I3 = float(_trapz(u_np**3 - 0.5 * ux_np**2, dx=dx))
+            I2 = torch.dot(self.q, u * u)
+            I3 = torch.dot(self.q, u ** 3 - 0.5 * ux * ux)
         return I1, I2, I3
 
-    def _conservation_loss(self, t_samples):
-        cfg = self.config
-        loss = torch.tensor(0.0, dtype=torch.float64, device=self.device)
+    def _compute_reference_invariants(self):
+        with torch.no_grad():
+            C1, C2, C3 = self._invariants(self.ic_vals)
+        self.C1_ref, self.C2_ref, self.C3_ref = (float(C1), float(C2), float(C3))
+        print(f"Reference invariants: C1={self.C1_ref:.8f}, "
+              f"C2={self.C2_ref:.8f}, C3={self.C3_ref:.8f}")
+        print(f"Boundary values: ga={self.ga0:.6e}, gb={self.gb0:.6e}")
+
+    def _save_config(self):
+        c = {k: v for k, v in self.cfg.items() if not callable(v)}
+        c.update(C1_ref=self.C1_ref, C2_ref=self.C2_ref, C3_ref=self.C3_ref,
+                 ga0=self.ga0, gb0=self.gb0, device=str(self.device))
+        json.dump(c, open(os.path.join(self.out_dir, "config.json"), "w"),
+                  indent=2)
+
+    # ------------------------------------------------------------------
+    # forward: one time level
+    # ------------------------------------------------------------------
+
+    def _fields_at(self, t_val, project=True):
+        """Return (u_star, u_star_t, state) at a single time level."""
+        N = self.ops.N
+        t_vec = torch.full((N,), float(t_val), dtype=torch.float64,
+                           device=self.device, requires_grad=True)
+        u_tilde = self.model(self.x, t_vec)
+        # the network is pointwise in t, so one backward pass gives the whole
+        # vector d(u~)/dt
+        u_tilde_t = torch.autograd.grad(
+            u_tilde, t_vec, grad_outputs=torch.ones_like(u_tilde),
+            create_graph=True)[0]
+
+        kind = self.cfg.get('projection')
+        if not project or kind is None:
+            return u_tilde, u_tilde_t, None
+
+        if kind == 'helmholtz':
+            u_star, st = proj.helmholtz_projection(
+                u_tilde, self.C1_ref, self.C2_ref, self.cfg['mu'], self.dx,
+                self.q, self.D1c, ga=self._ga(t_val), gb=self._gb(t_val),
+                tol=self.cfg.get('newton_tol', 1e-12),
+                max_iter=self.cfg.get('newton_max_iter', 50))
+            # No cross-step multiplier cache: lam2 varies strongly with t
+            # (roughly 0 at t=0 rising to tens at late times), so a value
+            # cached from another time level is a worse start than the
+            # analytic guess computed inside the solver.
+            if st.residual >= max(self.cfg.get('newton_tol', 1e-12), 1e-10):
+                self._newton_failures += 1
+        elif kind == 'polynomial':
+            C2_poly = self.cfg['C2_poly_ref']
+            u_star, st = proj.polynomial_projection(
+                u_tilde, self.C1_ref, C2_poly, self.q)
+        else:
+            raise ValueError(f"unknown projection {kind!r}")
+
+        u_star_t = proj.project_tangent(u_tilde_t, st)
+        return u_star, u_star_t, st
+
+    def _residual(self, u, u_t):
+        cfg = self.cfg
+        ux = self.ops.d1(u)
+        if cfg['equation'] == 'rlw':
+            uxxt = self.ops.d2(u_t)
+            return u_t + ux + cfg['eps'] * u * ux - cfg['mu'] * uxxt
+        if cfg['equation'] == 'kdv':
+            return u_t + 6.0 * u * ux + self.ops.d3(u)
+        raise ValueError(cfg['equation'])
+
+    # ------------------------------------------------------------------
+    # loss
+    # ------------------------------------------------------------------
+
+    def _loss(self, lam_soft_i3=0.0):
+        cfg = self.cfg
+        n_t = cfg.get('n_t', 10)
+        skip = cfg.get('edge_skip', 4)
+        T = cfg['T']
+
+        t_samples = (torch.rand(n_t, dtype=torch.float64) * T).tolist()
+
+        loss_pde = torch.zeros((), dtype=torch.float64, device=self.device)
+        loss_i3 = torch.zeros((), dtype=torch.float64, device=self.device)
+
         for t_val in t_samples:
-            t_vec = torch.full_like(self.x_cons, t_val.item())
-            u_hat = self.model(self.x_cons, t_vec)
+            u, u_t, _ = self._fields_at(t_val)
+            r = self._residual(u, u_t)
+            loss_pde = loss_pde + (r[skip:-skip] ** 2).mean()
+            if lam_soft_i3 > 0:
+                _, _, I3 = self._invariants(u)
+                loss_i3 = loss_i3 + ((I3 - self.C3_ref) / self.C3_ref) ** 2
 
-            if cfg.get('projection') == 'helmholtz':
-                u_proj = proj.helmholtz_projection(
-                    u_hat, self.C1_ref, self.C2_ref,
-                    cfg['mu'], self.dx_cons,
-                    ga=cfg.get('ga', 0.0), gb=cfg.get('gb', 0.0))
-            elif cfg.get('projection') == 'polynomial':
-                u_proj = proj.polynomial_projection(u_hat, self.C1_ref, self.C2_ref,
-                                                    self.dx_cons)
-            else:
-                u_proj = u_hat
+        loss_pde = loss_pde / n_t
+        total = loss_pde + lam_soft_i3 * loss_i3 / n_t
 
-            if cfg.get('soft_I3', False):
-                ux = torch.gradient(u_proj, spacing=(self.dx_cons,), dim=-1)[0]
-                if cfg['equation'] == 'rlw':
-                    I3 = torch.trapezoid(u_proj**3 + 3.0 * u_proj**2, dx=self.dx_cons)
-                else:
-                    I3 = torch.trapezoid(u_proj**3 - 0.5 * ux**2, dx=self.dx_cons)
-                loss = loss + (I3 - self.C3_ref)**2
-        return loss / len(t_samples)
+        # Vanilla has no hard boundary layer, so the initial and boundary
+        # conditions must be imposed softly. Without them the PDE residual
+        # alone is minimised by u == 0, which solves every equation here.
+        loss_ibc = torch.zeros((), dtype=torch.float64, device=self.device)
+        if cfg.get('soft_ibc', False):
+            zeros = torch.zeros_like(self.x)
+            u0 = self.model(self.x, zeros)
+            loss_ibc = ((u0 - self.ic_vals) ** 2).mean()
+            tb = torch.tensor(t_samples, dtype=torch.float64,
+                              device=self.device)
+            xa = torch.full_like(tb, cfg['xa'])
+            xb = torch.full_like(tb, cfg['xb'])
+            ua, ub = self.model(xa, tb), self.model(xb, tb)
+            loss_ibc = loss_ibc + ((ua - self.ga0) ** 2).mean() \
+                                + ((ub - self.gb0) ** 2).mean()
+            total = total + cfg.get('lam_ibc', 1.0) * loss_ibc
 
-    def _pde_loss(self):
-        if self.config['equation'] == 'kdv':
-            r = pde_residual_kdv(self.model, self.x_pde, self.t_pde)
-        elif self.config['equation'] == 'rlw':
-            r = pde_residual_rlw(self.model, self.x_pde, self.t_pde,
-                                  eps=self.config['eps'], mu=self.config['mu'])
-        return (r**2).mean()
+        return total, loss_pde.detach(), loss_ibc.detach()
 
-    def _log_step(self, phase, step, total, loss_pde, loss_total):
+    # ------------------------------------------------------------------
+    # diagnostics
+    # ------------------------------------------------------------------
+
+    @torch.no_grad()
+    def _diagnostics(self, t_val):
+        """Invariant drift and boundary error at one time, on the output field."""
+        N = self.ops.N
+        t_vec = torch.full((N,), float(t_val), dtype=torch.float64,
+                           device=self.device)
+        u_tilde = self.model(self.x, t_vec)
+        kind = self.cfg.get('projection')
+        if kind == 'helmholtz':
+            u = proj.helmholtz_projection(
+                u_tilde, self.C1_ref, self.C2_ref, self.cfg['mu'], self.dx,
+                self.q, self.D1c, ga=self._ga(t_val), gb=self._gb(t_val))[0]
+        elif kind == 'polynomial':
+            u = proj.polynomial_projection(
+                u_tilde, self.C1_ref, self.cfg['C2_poly_ref'], self.q)[0]
+        else:
+            u = u_tilde
+        I1, I2, I3 = self._invariants(u)
+        refs = (self.C1_ref, self.C2_ref, self.C3_ref)
+        drift = [abs(float(I) - R) / (abs(R) + 1e-30)
+                 for I, R in zip((I1, I2, I3), refs)]
+        bc_err = max(abs(float(u[0]) - self._ga(t_val)),
+                     abs(float(u[-1]) - self._gb(t_val)))
+        return drift, bc_err, u
+
+    def _log(self, phase, step, total, loss_total, loss_pde, loss_ibc):
         self.global_step += 1
-        entry = {
-            'global_step': self.global_step,
-            'phase': phase, 'step': step,
-            'loss_pde': loss_pde, 'loss_total': loss_total,
-        }
-
-        if self.global_step % 500 == 0:
-            I1, I2, I3 = self._compute_conservation_at_t(self.config['T'] / 2.0)
-            entry['I1_mid'] = I1
-            entry['I2_mid'] = I2
-            entry['I3_mid'] = I3
-            entry['I1_drift'] = abs(I1 - self.C1_ref) / (abs(self.C1_ref) + 1e-30)
-            entry['I2_drift'] = abs(I2 - self.C2_ref) / (abs(self.C2_ref) + 1e-30)
-            entry['I3_drift'] = abs(I3 - self.C3_ref) / (abs(self.C3_ref) + 1e-30)
-
-        self.history.append(entry)
-
+        e = {'global_step': self.global_step, 'phase': phase, 'step': step,
+             'loss_total': loss_total, 'loss_pde': loss_pde}
+        if loss_ibc:
+            e['loss_ibc'] = loss_ibc
+        if self.global_step % self.cfg.get('diag_every', 20) == 0:
+            drift, bc_err, _ = self._diagnostics(self.cfg['T'] / 2.0)
+            e.update(I1_drift=drift[0], I2_drift=drift[1], I3_drift=drift[2],
+                     bc_err=bc_err)
+        self.history.append(e)
         if self.use_wandb:
-            wandb.log({k: v for k, v in entry.items() if k != 'phase'})
-
+            wandb.log({k: v for k, v in e.items() if k != 'phase'})
         if loss_pde < self.best_loss and not math.isnan(loss_pde):
             self.best_loss = loss_pde
             torch.save(self.model.state_dict(),
                        os.path.join(self.out_dir, "model_best.pth"))
+        msg = f"[{phase} {step}/{total}] total={loss_total:.6e} pde={loss_pde:.6e}"
+        if self._newton_failures:
+            msg += f" newton_fail={self._newton_failures}"
+        if 'I2_drift' in e:
+            msg += f" I2drift={e['I2_drift']:.3e} bc={e['bc_err']:.2e}"
+        print(msg, flush=True)
 
-        print(f"[{phase} {step}/{total}] PDE={loss_pde:.6e} Total={loss_total:.6e}", flush=True)
+    # ------------------------------------------------------------------
+    # optimisation
+    # ------------------------------------------------------------------
+
+    def train_adam(self, n_iter, lr=1e-3, lam_soft_i3=0.0, log_every=100):
+        opt = torch.optim.Adam(self.model.parameters(), lr=lr)
+        for step in range(1, n_iter + 1):
+            opt.zero_grad()
+            total, lp, li = self._loss(lam_soft_i3)
+            total.backward()
+            opt.step()
+            if step % log_every == 0 or step == 1:
+                self._log('Adam', step, n_iter, float(total), float(lp),
+                          float(li))
+        self._save_history()
+
+    def train_lbfgs(self, n_iter, lr=1.0, lam_soft_i3=0.0, log_every=20):
+        opt = torch.optim.LBFGS(self.model.parameters(), lr=lr, max_iter=1,
+                                history_size=50, line_search_fn='strong_wolfe')
+        box = [0.0, 0.0, 0.0]
+
+        def closure():
+            opt.zero_grad()
+            total, lp, li = self._loss(lam_soft_i3)
+            total.backward()
+            box[0], box[1], box[2] = float(total), float(lp), float(li)
+            return total
+
+        for step in range(1, n_iter + 1):
+            opt.step(closure)
+            if step % log_every == 0 or step == 1:
+                self._log('LBFGS', step, n_iter, box[0], box[1], box[2])
+        self._save_checkpoint('final')
+        self._save_history()
+
+    # ------------------------------------------------------------------
+    # output
+    # ------------------------------------------------------------------
 
     def _save_history(self):
-        json.dump(self.history, open(os.path.join(self.out_dir, "history.json"), "w"))
+        json.dump(self.history,
+                  open(os.path.join(self.out_dir, "history.json"), "w"))
 
     def _save_checkpoint(self, tag):
-        path = os.path.join(self.out_dir, f"model_{tag}.pth")
-        torch.save({
-            'model_state_dict': self.model.state_dict(),
-            'global_step': self.global_step,
-            'best_loss': self.best_loss,
-        }, path)
+        torch.save({'model_state_dict': self.model.state_dict(),
+                    'global_step': self.global_step,
+                    'best_loss': self.best_loss},
+                   os.path.join(self.out_dir, f"model_{tag}.pth"))
 
-    def train_adam(self, n_iter, lr=1e-3, lam_cons=0.0, log_every=500):
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
-        cfg = self.config
+    def evaluate(self, exact_fn=None):
+        T = self.cfg['T']
+        drift, bc_err, u = self._diagnostics(T)
+        u_np = u.cpu().numpy()
+        x_np = self.x.cpu().numpy()
 
-        for step in range(1, n_iter + 1):
-            optimizer.zero_grad()
-            loss_pde = self._pde_loss()
-            loss = loss_pde
+        res = {'C1_drift': drift[0], 'C2_drift': drift[1], 'C3_drift': drift[2],
+               'bc_error': bc_err, 'best_pde_loss': self.best_loss,
+               'total_steps': self.global_step,
+               'C1_ref': self.C1_ref, 'C2_ref': self.C2_ref,
+               'C3_ref': self.C3_ref}
 
-            if lam_cons > 0 and cfg.get('projection') is not None:
-                n_t = cfg.get('n_t_conservation', 10)
-                t_samples = torch.rand(n_t, dtype=torch.float64, device=self.device) * cfg['T']
-                loss_cons = self._conservation_loss(t_samples)
-                loss = loss + lam_cons * loss_cons
+        if exact_fn is not None:
+            u_ex = exact_fn(x_np)
+            d = u_np - u_ex
+            res['L2_absolute'] = float(np.sqrt(np.mean(d ** 2)))
+            res['L2_relative'] = float(
+                np.sqrt(np.sum(d ** 2) / (np.sum(u_ex ** 2) + 1e-30)))
+            res['Linf'] = float(np.max(np.abs(d)))
+            np.savez(os.path.join(self.out_dir, "solution_final.npz"),
+                     x=x_np, u_pred=u_np, u_exact=u_ex, t=T)
+            print(f"L2_abs={res['L2_absolute']:.6e}  "
+                  f"L2_rel={res['L2_relative']:.6e}  Linf={res['Linf']:.6e}")
+        else:
+            np.savez(os.path.join(self.out_dir, "solution_final.npz"),
+                     x=x_np, u_pred=u_np, t=T)
 
-            loss.backward()
-            optimizer.step()
-
-            if step % log_every == 0 or step == 1:
-                self._log_step('Adam', step, n_iter, loss_pde.item(), loss.item())
-
-            if n_iter >= 5 and step % (n_iter // 5) == 0:
-                self._save_checkpoint(f"adam_{step}")
-
-        self._save_history()
-
-    def train_lbfgs(self, n_iter, lr=1.0, lam_cons=0.0, log_every=100):
-        optimizer = torch.optim.LBFGS(self.model.parameters(), lr=lr,
-                                       max_iter=1, history_size=50,
-                                       line_search_fn='strong_wolfe')
-        cfg = self.config
-
-        for step in range(1, n_iter + 1):
-            loss_val = [None, None]
-
-            def closure():
-                optimizer.zero_grad()
-                loss_pde = self._pde_loss()
-                loss = loss_pde
-                if lam_cons > 0 and cfg.get('projection') is not None:
-                    n_t = cfg.get('n_t_conservation', 10)
-                    t_samples = torch.rand(n_t, dtype=torch.float64,
-                                           device=self.device) * cfg['T']
-                    loss = loss + lam_cons * self._conservation_loss(t_samples)
-                loss.backward()
-                loss_val[0] = loss_pde.item()
-                loss_val[1] = loss.item()
-                return loss
-
-            optimizer.step(closure)
-
-            if step % log_every == 0 or step == 1:
-                self._log_step('LBFGS', step, n_iter, loss_val[0], loss_val[1])
-
-        self._save_checkpoint("final")
-        self._save_history()
-
-    def evaluate(self, exact_fn, n_eval=1000):
-        cfg = self.config
-        x_eval = torch.linspace(cfg['xa'], cfg['xb'], n_eval,
-                                dtype=torch.float64, device=self.device)
-        t_eval = torch.full_like(x_eval, cfg['T'])
-
-        with torch.no_grad():
-            u_pred = self.model(x_eval, t_eval)
-
-        x_np = x_eval.cpu().numpy()
-        u_pred_np = u_pred.cpu().numpy()
-        u_exact_np = exact_fn(x_np)
-
-        diff = u_pred_np - u_exact_np
-        l2_abs = float(np.sqrt(np.mean(diff**2)))
-        l2_rel = float(np.sqrt(np.sum(diff**2) / (np.sum(u_exact_np**2) + 1e-30)))
-        linf = float(np.max(np.abs(diff)))
-
-        # Conservation at final time
-        I1_T, I2_T, I3_T = self._compute_conservation_at_t(cfg['T'])
-
-        results = {
-            'L2_absolute': l2_abs,
-            'L2_relative': l2_rel,
-            'Linf': linf,
-            'C1_pred': I1_T, 'C1_ref': self.C1_ref,
-            'C2_pred': I2_T, 'C2_ref': self.C2_ref,
-            'C3_pred': I3_T, 'C3_ref': self.C3_ref,
-            'C1_drift': abs(I1_T - self.C1_ref) / (abs(self.C1_ref) + 1e-30),
-            'C2_drift': abs(I2_T - self.C2_ref) / (abs(self.C2_ref) + 1e-30),
-            'C3_drift': abs(I3_T - self.C3_ref) / (abs(self.C3_ref) + 1e-30),
-            'best_pde_loss': self.best_loss,
-            'total_steps': self.global_step,
-        }
-
-        print(f"L2_abs={l2_abs:.6e}, L2_rel={l2_rel:.6e}, Linf={linf:.6e}")
-        print(f"C1 drift={results['C1_drift']:.6e}, C2 drift={results['C2_drift']:.6e}, "
-              f"C3 drift={results['C3_drift']:.6e}")
-
-        json.dump(results, open(os.path.join(self.out_dir, "results.json"), "w"), indent=2)
-
+        print(f"drift: I1={drift[0]:.3e} I2={drift[1]:.3e} I3={drift[2]:.3e}"
+              f"   bc_err={bc_err:.3e}")
+        json.dump(res, open(os.path.join(self.out_dir, "results.json"), "w"),
+                  indent=2)
         if self.use_wandb:
-            wandb.log({f"final/{k}": v for k, v in results.items()})
-
-        # Save predicted solution for later plotting
-        np.savez(os.path.join(self.out_dir, "solution_final.npz"),
-                 x=x_np, u_pred=u_pred_np, u_exact=u_exact_np, t=cfg['T'])
-
-        return results
+            wandb.log({f"final/{k}": v for k, v in res.items()})
+        return res
 
     def is_run_valid(self):
-        """Check if the run produced valid results (for push gating).
-        Only rejects NaN/Inf — even high-loss runs are worth keeping for ablation."""
-        if math.isnan(self.best_loss) or math.isinf(self.best_loss):
-            return False
-        return True
+        """Only rejects NaN/Inf. High-loss runs are still useful for ablation."""
+        return not (math.isnan(self.best_loss) or math.isinf(self.best_loss))

@@ -1,254 +1,392 @@
 """Conservation projection layers.
 
-Polynomial projection (KdV/KP): affine rescaling to match C1, C2.
-Helmholtz projection (RLW): Newton on 2x2 system with tridiagonal solves.
+Two projections are provided.
+
+`polynomial_projection` reproduces the affine standardisation of PINN-Proj and
+SDIFP. It enforces invariants of the form int(u) and int(u^2).
+
+`helmholtz_projection` is the contribution of this work. It enforces
+int(u) = C1 together with a derivative-dependent invariant
+int(u^2 + mu*u_x^2) = C2 by solving the Euler-Lagrange equation
+
+    (1 + lam2) u* - lam2*mu*u*_xx = u~ - lam1/2,   u*(a)=ga, u*(b)=gb,
+
+which is a linear two-point boundary value problem for fixed multipliers. The
+multipliers are found by Newton's method on a 2x2 system. All nonlinearity is
+confined to those two scalars; the N-dimensional part stays linear, which is
+what keeps the cost at one banded solve per Newton iteration.
+
+Each projection returns `(u_star, state)`. The state carries everything needed
+to apply the projection's Jacobian to a tangent vector, which is how the time
+derivative of the projected field is obtained (see `project_tangent`).
+
+Discretisation note: the Helmholtz operator uses the three-point second-order
+stencil, and the invariant uses the matching second-order central difference
+`D1c`. The same `D1c` must be used to compute the reference value C2, so that
+the discrete constraint is exactly attainable. The higher-order operators in
+`operators.py` are for the PDE residual, not for the invariant.
 """
 import torch
-import numpy as np
 
 
 # ---------------------------------------------------------------------------
-# Polynomial (affine) projection — reproduces SDIFP baseline
+# Second-order central difference used inside the invariant
 # ---------------------------------------------------------------------------
 
-def polynomial_projection(u_tilde, C1, C2, dx):
-    """Affine rescale u_tilde to satisfy int u dx = C1 and int u^2 dx = C2.
+def central_d1_matrix(N, dx, device='cpu', dtype=torch.float64):
+    """Second-order first-derivative matrix, consistent with the 3-point
+    Helmholtz operator. Used for the u_x term inside the invariant."""
+    D = torch.zeros((N, N), device=device, dtype=dtype)
+    idx = torch.arange(1, N - 1, device=device)
+    D[idx, idx - 1] = -1.0 / (2.0 * dx)
+    D[idx, idx + 1] = 1.0 / (2.0 * dx)
+    D[0, 0] = -3.0 / (2.0 * dx)
+    D[0, 1] = 4.0 / (2.0 * dx)
+    D[0, 2] = -1.0 / (2.0 * dx)
+    D[N - 1, N - 1] = 3.0 / (2.0 * dx)
+    D[N - 1, N - 2] = -4.0 / (2.0 * dx)
+    D[N - 1, N - 3] = 1.0 / (2.0 * dx)
+    return D
 
-    u* = (sigma0 / sigma_tilde) * (u_tilde - mu_tilde) + mu0
 
-    Args:
-        u_tilde: (N,) tensor, BC-satisfying network output at one time level
-        C1, C2: target invariant values (scalars)
-        dx: grid spacing (float)
-    Returns:
-        u_star: (N,) tensor satisfying both invariants
+def central_d2_matrix(N, dx, device='cpu', dtype=torch.float64):
+    """Three-point second-derivative matrix.
+
+    This must be exactly the operator that appears in the Helmholtz matrix,
+    otherwise the sensitivity p2 is inconsistent with the system and Newton
+    fails to converge. Boundary rows are left at zero: p1 and p2 vanish there.
+    """
+    D = torch.zeros((N, N), device=device, dtype=dtype)
+    idx = torch.arange(1, N - 1, device=device)
+    D[idx, idx - 1] = 1.0 / (dx * dx)
+    D[idx, idx] = -2.0 / (dx * dx)
+    D[idx, idx + 1] = 1.0 / (dx * dx)
+    return D
+
+
+def invariant_i2(u, q, D1c, mu):
+    """Discrete int(u^2 + mu*u_x^2) dx."""
+    ux = torch.matmul(u, D1c.T)
+    return torch.dot(q, u * u + mu * ux * ux)
+
+
+# ---------------------------------------------------------------------------
+# Helmholtz operator assembly
+# ---------------------------------------------------------------------------
+
+def build_helmholtz_matrix(N, kappa, dx, device, dtype):
+    """Dense tridiagonal Helmholtz matrix with Dirichlet boundary rows.
+
+    Row 0 and row N-1 are replaced by the identity so that u*(a) and u*(b) are
+    imposed directly. Only the super-diagonal entry of row 0 and the
+    sub-diagonal entry of row N-1 are removed. The sub-diagonal of row 1 and
+    the super-diagonal of row N-2 are retained: they carry the boundary data
+    into the interior. Zeroing them would decouple the first and last interior
+    nodes from the boundary, which is harmless only when ga = gb = 0.
+    """
+    c = kappa / (dx * dx)
+    A = torch.zeros((N, N), device=device, dtype=dtype)
+    idx = torch.arange(1, N - 1, device=device)
+    A[idx, idx] = 1.0 + 2.0 * c
+    A[idx, idx - 1] = -c
+    A[idx, idx + 1] = -c
+    A[0, 0] = 1.0
+    A[N - 1, N - 1] = 1.0
+    return A
+
+
+class _State:
+    """Everything needed to apply the projection Jacobian to a tangent."""
+    __slots__ = ('kind', 'A', 'P', 'R', 'J', 'coeff', 'u_star', 'u_tilde',
+                 'q', 'D1c', 'mu', 'alpha', 'm_tilde', 'sigma_tilde',
+                 'sigma0', 'vol', 'newton_iters', 'residual', 'lam')
+
+
+# ---------------------------------------------------------------------------
+# Polynomial (affine) projection - PRIOR WORK, used as baseline
+# ---------------------------------------------------------------------------
+
+def polynomial_projection(u_tilde, C1, C2, q):
+    """Affine rescaling matching int(u) = C1 and int(u^2) = C2.
+
+    u* = (sigma0/sigma_tilde) * (u_tilde - m_tilde) + m0
+
+    This is the closed-form solution of the constrained least-squares problem
+    when both invariants are polynomial. Reproduces SDIFP / PINN-Proj.
+    """
+    vol = q.sum()
+    m_tilde = torch.dot(q, u_tilde) / vol
+    s_tilde = torch.dot(q, u_tilde * u_tilde) / vol
+    var_tilde = torch.clamp(s_tilde - m_tilde * m_tilde, min=1e-30)
+    sigma_tilde = torch.sqrt(var_tilde)
+
+    m0 = C1 / vol
+    var0 = torch.clamp(C2 / vol - m0 * m0, min=1e-30) if torch.is_tensor(C2) \
+        else max(C2 / vol.item() - (C1 / vol.item()) ** 2, 1e-30)
+    sigma0 = torch.as_tensor(var0, device=u_tilde.device,
+                             dtype=u_tilde.dtype).sqrt()
+
+    alpha = sigma0 / sigma_tilde
+    u_star = alpha * (u_tilde - m_tilde) + m0
+
+    st = _State()
+    st.kind = 'polynomial'
+    st.u_tilde = u_tilde.detach()
+    st.q = q
+    st.vol = vol.detach()
+    st.alpha = alpha.detach()
+    st.m_tilde = m_tilde.detach()
+    st.sigma_tilde = sigma_tilde.detach()
+    st.sigma0 = sigma0.detach()
+    st.newton_iters = 0
+    st.residual = 0.0
+    st.lam = (0.0, 0.0)
+    return u_star, st
+
+
+# ---------------------------------------------------------------------------
+# Helmholtz projection - THIS WORK
+# ---------------------------------------------------------------------------
+
+def _initial_guess(u_tilde, C1, C2, mu, q, D1c):
+    """Analytic starting point for the Newton iteration.
+
+    Dropping the smoothing term, the Euler-Lagrange solution is the affine map
+    u* = (u~ - lam1/2)/(1 + lam2), for which I2[u*] ~ I2[u~]/(1+lam2)^2. That
+    inverts to
+
+        lam2 ~ sqrt(I2[u~]/C2) - 1,
+        lam1 ~ 2*(int u~ - (1+lam2)*C1)/|Omega|.
+
+    Starting from zero instead means Newton has to travel to lam2 of order 30
+    at late times, which needs many damped steps and can stray into lam2 < 0
+    where the operator is indefinite. This guess is cheap and adapts to each
+    time level, unlike a single cached multiplier.
+    """
+    vol = float(q.sum())
+    i2 = float(invariant_i2(u_tilde, q, D1c, mu))
+    c2 = float(C2)
+    ratio = i2 / c2 if c2 > 0 else 1.0
+    lam2 = max((ratio ** 0.5) - 1.0, -0.9) if ratio > 0 else 0.0
+    lam1 = 2.0 * (float(torch.dot(q, u_tilde)) - (1.0 + lam2) * float(C1)) / vol
+    return lam1, lam2
+
+
+def _newton_solve(u_tilde, C1, C2, mu, dx, q, D1c, ga, gb, tol, max_iter,
+                  lam_init=None):
+    """Run Newton on (lam1, lam2). Returns the converged state.
+
+    Runs without autograd tracking; the gradient is supplied analytically by
+    the custom Function below. `lam_init` warm-starts from the multipliers of
+    the previous training step, which typically cuts the iteration count to
+    one or two because the network changes slowly between steps.
     """
     N = u_tilde.shape[0]
-    L = dx * (N - 1)
+    device, dtype = u_tilde.device, u_tilde.dtype
+    if lam_init is None:
+        lam1, lam2 = _initial_guess(u_tilde, C1, C2, mu, q, D1c)
+        lam1 = torch.as_tensor(lam1, device=device, dtype=dtype)
+        lam2 = torch.as_tensor(lam2, device=device, dtype=dtype)
+    else:
+        lam1 = torch.as_tensor(lam_init[0], device=device, dtype=dtype)
+        lam2 = torch.as_tensor(lam_init[1], device=device, dtype=dtype)
+    D2c = central_d2_matrix(N, dx, device, dtype)
 
-    mu_tilde = torch.trapezoid(u_tilde, dx=dx) / L
-    sigma2_tilde = torch.trapezoid(u_tilde**2, dx=dx) / L - mu_tilde**2
+    A = None
+    u_star = None
+    n_iter = 0
+    resid = float('inf')
 
-    mu0 = C1 / L
-    sigma2_0 = C2 / L - mu0**2
-
-    sigma_ratio = torch.sqrt(torch.clamp(sigma2_0, min=1e-30) /
-                             torch.clamp(sigma2_tilde, min=1e-30))
-    u_star = sigma_ratio * (u_tilde - mu_tilde) + mu0
-    return u_star
-
-
-# ---------------------------------------------------------------------------
-# Thomas algorithm for tridiagonal systems (pure torch, O(N))
-# ---------------------------------------------------------------------------
-
-def thomas_solve(lower, diag, upper, rhs):
-    """Solve tridiagonal system Ax = rhs via Thomas algorithm.
-
-    Args:
-        lower: (N-1,) sub-diagonal
-        diag:  (N,) main diagonal
-        upper: (N-1,) super-diagonal
-        rhs:   (N,) right-hand side
-    Returns:
-        x: (N,) solution
-    """
-    N = diag.shape[0]
-    c = torch.zeros(N, dtype=diag.dtype, device=diag.device)
-    d = torch.zeros(N, dtype=diag.dtype, device=diag.device)
-
-    c[0] = upper[0] / diag[0]
-    d[0] = rhs[0] / diag[0]
-    for i in range(1, N):
-        denom = diag[i] - lower[i - 1] * c[i - 1]
-        if i < N - 1:
-            c[i] = upper[i] / denom
-        d[i] = (rhs[i] - lower[i - 1] * d[i - 1]) / denom
-
-    x = torch.zeros(N, dtype=diag.dtype, device=diag.device)
-    x[N - 1] = d[N - 1]
-    for i in range(N - 2, -1, -1):
-        x[i] = d[i] - c[i] * x[i + 1]
-    return x
-
-
-# ---------------------------------------------------------------------------
-# Helmholtz projection — the novel contribution
-# ---------------------------------------------------------------------------
-
-def _build_helmholtz_tridiag(N, kappa, dx):
-    """Build tridiagonal Helmholtz operator H = (1+lam2)I - lam2*mu*D_xx.
-
-    In practice we factor out and work with H such that Hu* = rhs.
-    The operator is: diag = 1 + 2*kappa/dx^2, off-diag = -kappa/dx^2.
-    Boundary rows are identity (BCs imposed directly).
-    """
-    c = kappa / dx**2
-    diag = torch.full((N,), 1.0 + 2.0 * c, dtype=torch.float64)
-    off = torch.full((N - 1,), -c, dtype=torch.float64)
-
-    diag[0] = 1.0
-    diag[-1] = 1.0
-    off[0] = 0.0
-    off[-1] = 0.0
-
-    return off, diag, off.clone()
-
-
-class HelmholtzProjection(torch.autograd.Function):
-    """Custom autograd function for Helmholtz projection with IFT backward."""
-
-    @staticmethod
-    def forward(ctx, u_tilde, C1, C2, mu, dx, ga, gb, tol, max_iter):
-        """Newton solve for lambda1, lambda2, then Helmholtz solve for u*.
-
-        Args:
-            u_tilde: (N,) tensor
-            C1, C2: target invariants (float)
-            mu: dispersion parameter (float)
-            dx: grid spacing (float)
-            ga, gb: boundary values (float)
-            tol: Newton convergence tolerance
-            max_iter: max Newton iterations
-        Returns:
-            u_star: (N,) projected solution
-        """
-        N = u_tilde.shape[0]
-        lam1 = torch.tensor(0.0, dtype=torch.float64)
-        lam2 = torch.tensor(0.0, dtype=torch.float64)
-
-        for newton_iter in range(max_iter):
-            coeff = 1.0 + lam2
-            kappa = lam2 * mu / coeff
-            rhs_helm = (u_tilde - lam1 / 2.0) / coeff
-            rhs_helm[0] = ga
-            rhs_helm[-1] = gb
-
-            lower, diag, upper = _build_helmholtz_tridiag(N, kappa, dx)
-            u_star = thomas_solve(lower, diag, upper, rhs_helm)
-
-            u_star_x = torch.zeros_like(u_star)
-            u_star_x[1:-1] = (u_star[2:] - u_star[:-2]) / (2.0 * dx)
-            u_star_x[0] = (u_star[1] - u_star[0]) / dx
-            u_star_x[-1] = (u_star[-1] - u_star[-2]) / dx
-
-            F1 = torch.trapezoid(u_star, dx=dx) - C1
-            F2 = torch.trapezoid(u_star**2 + mu * u_star_x**2, dx=dx) - C2
-
-            if abs(F1.item()) + abs(F2.item()) < tol:
-                break
-
-            # Sensitivity p1: H p1 = -1/2, p1(a)=p1(b)=0
-            rhs_p1 = torch.full((N,), -0.5 / coeff, dtype=torch.float64)
-            rhs_p1[0] = 0.0
-            rhs_p1[-1] = 0.0
-            p1 = thomas_solve(lower, diag, upper, rhs_p1)
-
-            # Sensitivity p2: H p2 = (-u* + mu*u*_xx) / coeff, p2(a)=p2(b)=0
-            u_star_xx = torch.zeros_like(u_star)
-            u_star_xx[1:-1] = (u_star[2:] - 2.0 * u_star[1:-1] + u_star[:-2]) / dx**2
-            rhs_p2 = (-u_star + mu * u_star_xx) / coeff
-            rhs_p2[0] = 0.0
-            rhs_p2[-1] = 0.0
-            p2 = thomas_solve(lower, diag, upper, rhs_p2)
-
-            p1_x = torch.zeros_like(p1)
-            p1_x[1:-1] = (p1[2:] - p1[:-2]) / (2.0 * dx)
-            p2_x = torch.zeros_like(p2)
-            p2_x[1:-1] = (p2[2:] - p2[:-2]) / (2.0 * dx)
-
-            J11 = torch.trapezoid(p1, dx=dx)
-            J12 = torch.trapezoid(p2, dx=dx)
-            J21 = torch.trapezoid(2.0 * u_star * p1 + 2.0 * mu * u_star_x * p1_x, dx=dx)
-            J22 = torch.trapezoid(2.0 * u_star * p2 + 2.0 * mu * u_star_x * p2_x, dx=dx)
-
-            det = J11 * J22 - J12 * J21
-            if abs(det.item()) < 1e-30:
-                break
-            dlam1 = -(J22 * F1 - J12 * F2) / det
-            dlam2 = -(-J21 * F1 + J11 * F2) / det
-
-            lam1 = lam1 + dlam1
-            lam2 = lam2 + dlam2
-
-        ctx.save_for_backward(u_tilde, u_star, lam1, lam2)
-        ctx.mu = mu
-        ctx.dx = dx
-        ctx.ga = ga
-        ctx.gb = gb
-        return u_star
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        """Backward pass via implicit function theorem (adjoint method)."""
-        u_tilde, u_star, lam1, lam2 = ctx.saved_tensors
-        mu = ctx.mu
-        dx = ctx.dx
-        N = u_tilde.shape[0]
-
+    for n_iter in range(1, max_iter + 1):
         coeff = 1.0 + lam2
         kappa = lam2 * mu / coeff
-        lower, diag, upper = _build_helmholtz_tridiag(N, kappa, dx)
+        A = build_helmholtz_matrix(N, kappa, dx, device, dtype)
 
-        # Adjoint solve: H^T v = grad_output (H is symmetric so H^T = H)
-        rhs_adj = grad_output.clone()
-        rhs_adj[0] = 0.0
-        rhs_adj[-1] = 0.0
-        v = thomas_solve(lower, diag, upper, rhs_adj)
+        h = (u_tilde - lam1 / 2.0) / coeff
+        h = h.clone()
+        h[0] = ga
+        h[-1] = gb
 
-        # grad w.r.t. u_tilde: du*/du_tilde = H^{-1} / (1+lam2) for interior
-        grad_u_tilde = v / coeff
-        grad_u_tilde[0] = 0.0
-        grad_u_tilde[-1] = 0.0
+        u_star = torch.linalg.solve(A, h)
 
-        return grad_u_tilde, None, None, None, None, None, None, None, None
+        F1 = torch.dot(q, u_star) - C1
+        F2 = invariant_i2(u_star, q, D1c, mu) - C2
+        resid = float(F1.abs() + F2.abs())
+        if resid < tol:
+            break
+
+        # Sensitivities: same operator, two extra right-hand sides.
+        rhs = torch.zeros((N, 2), device=device, dtype=dtype)
+        rhs[1:-1, 0] = -0.5 / coeff
+        u_star_xx = torch.matmul(u_star, D2c.T)
+        rhs[1:-1, 1] = ((mu * u_star_xx - u_star) / coeff)[1:-1]
+        P = torch.linalg.solve(A, rhs)
+
+        R = _constraint_gradients(u_star, q, D1c, mu)
+        J = R.T @ P
+
+        det = J[0, 0] * J[1, 1] - J[0, 1] * J[1, 0]
+        if float(det.abs()) < 1e-300:
+            break
+        F = torch.stack([F1, F2])
+        dlam = -torch.linalg.solve(J, F)
+
+        # Backtracking line search. A full Newton step from a cold start can
+        # overshoot badly when the incoming field is far from the constraint
+        # set, which happens early in training. Halve the step until the
+        # residual decreases, and keep lam2 > -1 so the operator stays
+        # non-singular.
+        step = 1.0
+        for _ in range(30):
+            l1 = lam1 + step * dlam[0]
+            l2 = lam2 + step * dlam[1]
+            if float(l2) <= -0.999:
+                step *= 0.5
+                continue
+            cf = 1.0 + l2
+            kp = l2 * mu / cf
+            At = build_helmholtz_matrix(N, kp, dx, device, dtype)
+            ht = (u_tilde - l1 / 2.0) / cf
+            ht = ht.clone()
+            ht[0] = ga
+            ht[-1] = gb
+            ut = torch.linalg.solve(At, ht)
+            r_new = float((torch.dot(q, ut) - C1).abs()
+                          + (invariant_i2(ut, q, D1c, mu) - C2).abs())
+            if r_new < resid or step < 1e-6:
+                break
+            step *= 0.5
+        lam1 = lam1 + step * dlam[0]
+        lam2 = lam2 + step * dlam[1]
+
+    # Recompute sensitivities AT the converged multipliers. Inside the loop
+    # they are produced before the next convergence test, so on exit they
+    # correspond to the previous iterate.
+    coeff = 1.0 + lam2
+    kappa = lam2 * mu / coeff
+    A = build_helmholtz_matrix(N, kappa, dx, device, dtype)
+    h = (u_tilde - lam1 / 2.0) / coeff
+    h = h.clone()
+    h[0] = ga
+    h[-1] = gb
+    u_star = torch.linalg.solve(A, h)
+
+    rhs = torch.zeros((N, 2), device=device, dtype=dtype)
+    rhs[1:-1, 0] = -0.5 / coeff
+    u_star_xx = torch.matmul(u_star, D2c.T)
+    rhs[1:-1, 1] = ((mu * u_star_xx - u_star) / coeff)[1:-1]
+    P = torch.linalg.solve(A, rhs)
+    R = _constraint_gradients(u_star, q, D1c, mu)
+    J = R.T @ P
+
+    st = _State()
+    st.kind = 'helmholtz'
+    st.lam = (float(lam1), float(lam2))
+    st.A = A
+    st.P = P
+    st.R = R
+    st.J = J
+    st.coeff = coeff
+    st.u_star = u_star
+    st.u_tilde = u_tilde
+    st.q = q
+    st.D1c = D1c
+    st.mu = mu
+    st.newton_iters = n_iter
+    st.residual = resid
+    return st
 
 
-def helmholtz_projection(u_tilde, C1, C2, mu, dx, ga=0.0, gb=0.0,
-                          tol=1e-12, max_iter=20):
-    """Apply Helmholtz projection to enforce I1=C1, I2=int(u^2+mu*ux^2)=C2.
+def _constraint_gradients(u_star, q, D1c, mu):
+    """R = [dF1/du*, dF2/du*] as an (N, 2) matrix."""
+    r1 = q
+    ux = torch.matmul(u_star, D1c.T)
+    r2 = 2.0 * q * u_star + 2.0 * mu * torch.matmul(q * ux, D1c)
+    return torch.stack([r1, r2], dim=1)
 
-    Args:
-        u_tilde: (N,) tensor, BC-satisfying network output at one time level
-        C1: target mass invariant
-        C2: target momentum invariant (derivative-dependent)
-        mu: dispersion parameter
-        dx: grid spacing
-        ga, gb: boundary values for u*
-        tol: Newton tolerance
-        max_iter: max Newton iterations
-    Returns:
-        u_star: (N,) projected solution
+
+def helmholtz_projection(u_tilde, C1, C2, mu, dx, q, D1c,
+                         ga=0.0, gb=0.0, tol=1e-12, max_iter=20,
+                         lam_init=None):
+    """Project u_tilde onto {int u = C1, int(u^2 + mu u_x^2) = C2}.
+
+    Returns (u_star, state). The state is needed by `project_tangent`, and
+    `state.lam` can be fed back as `lam_init` on the next step.
     """
-    return HelmholtzProjection.apply(u_tilde, C1, C2, mu, dx, ga, gb, tol, max_iter)
+    with torch.no_grad():
+        st = _newton_solve(u_tilde.detach(), C1, C2, mu, dx, q, D1c,
+                           ga, gb, tol, max_iter, lam_init)
+    u_star = _HelmholtzApply.apply(u_tilde, st)
+    return u_star, st
+
+
+class _HelmholtzApply(torch.autograd.Function):
+    """Attaches the analytic gradient to an already-computed projection."""
+
+    @staticmethod
+    def forward(ctx, u_tilde, st):
+        ctx.state = st
+        return st.u_star.clone()
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        st = ctx.state
+        s = st.P.T @ grad_out
+        z = torch.linalg.solve(st.J.T, s)
+        g_eff = grad_out - st.R @ z
+        w = torch.linalg.solve(st.A.T, g_eff)
+        g_tilde = (w / st.coeff).clone()
+        g_tilde[0] = 0.0
+        g_tilde[-1] = 0.0
+        return g_tilde, None
 
 
 # ---------------------------------------------------------------------------
-# 2D polynomial projection for KP
+# Tangent propagation: d(u*)/dt from d(u~)/dt
+# ---------------------------------------------------------------------------
+
+def project_tangent(v, st):
+    """Apply the projection Jacobian to a tangent vector.
+
+    Because u*(t) = P(u~(t)), the chain rule gives
+        du*/dt = (dP/du~) du~/dt = (I - Pi) M v,
+    with M = A^{-1} E / (1 + lam2) and Pi = P J^{-1} R^T. This is exact for the
+    tangent. The state is held fixed, so second-order dependence of the
+    Jacobian on u~ is not differentiated through during backpropagation.
+    """
+    if st.kind == 'polynomial':
+        vol = st.vol
+        dm = torch.dot(st.q, v) / vol
+        ds2 = torch.dot(st.q, 2.0 * st.u_tilde * v) / vol - 2.0 * st.m_tilde * dm
+        dsig = ds2 / (2.0 * st.sigma_tilde)
+        return (-(st.sigma0 / st.sigma_tilde ** 2) * dsig
+                * (st.u_tilde - st.m_tilde)
+                + st.alpha * (v - dm))
+
+    Ev = v.clone()
+    Ev[0] = 0.0
+    Ev[-1] = 0.0
+    Mv = torch.linalg.solve(st.A, Ev) / st.coeff
+    s = st.R.T @ Mv
+    z = torch.linalg.solve(st.J, s)
+    return Mv - st.P @ z
+
+
+# ---------------------------------------------------------------------------
+# 2D polynomial projection (KP)
 # ---------------------------------------------------------------------------
 
 def polynomial_projection_2d(u_tilde, C1, C2, dx, dy):
-    """Affine rescale 2D field to match C1=int u dA and C2=int u^2 dA.
-
-    Args:
-        u_tilde: (Nx, Ny) tensor
-        C1, C2: target invariant values
-        dx, dy: grid spacings
-    Returns:
-        u_star: (Nx, Ny) tensor
-    """
+    """Affine rescaling on a 2D field. Same formula, 2D integrals."""
     Nx, Ny = u_tilde.shape
     area = dx * (Nx - 1) * dy * (Ny - 1)
-
     int_u = torch.trapezoid(torch.trapezoid(u_tilde, dx=dy, dim=1), dx=dx, dim=0)
-    int_u2 = torch.trapezoid(torch.trapezoid(u_tilde**2, dx=dy, dim=1), dx=dx, dim=0)
-
-    mu_tilde = int_u / area
-    sigma2_tilde = int_u2 / area - mu_tilde**2
-
-    mu0 = C1 / area
-    sigma2_0 = C2 / area - mu0**2
-
-    sigma_ratio = torch.sqrt(torch.clamp(sigma2_0, min=1e-30) /
-                             torch.clamp(sigma2_tilde, min=1e-30))
-    return sigma_ratio * (u_tilde - mu_tilde) + mu0
+    int_u2 = torch.trapezoid(torch.trapezoid(u_tilde ** 2, dx=dy, dim=1),
+                             dx=dx, dim=0)
+    m_tilde = int_u / area
+    var_tilde = torch.clamp(int_u2 / area - m_tilde ** 2, min=1e-30)
+    m0 = C1 / area
+    var0 = max(C2 / area - m0 ** 2, 1e-30)
+    alpha = torch.sqrt(torch.as_tensor(var0, device=u_tilde.device,
+                                       dtype=u_tilde.dtype) / var_tilde)
+    return alpha * (u_tilde - m_tilde) + m0
