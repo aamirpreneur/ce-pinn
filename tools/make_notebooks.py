@@ -231,7 +231,7 @@ EXPERIMENTS['RLW1_single_soliton'] = dict(
     config="""TAG      = 'rlw1'
 EQUATION = 'rlw'
 VARIANT  = 'ce_helm'   # vanilla | hard_bc | ce_poly | ce_helm | ce_full
-SMOKE    = True        # True for a quick check, False for the real run
+SMOKE    = False       # True for a 2-minute check, False for the real run
 
 EPS, MU  = 1.0, 1.0
 C_AMP    = 0.1         # amplitude parameter; wave amplitude is 3*c
@@ -299,7 +299,7 @@ EXPERIMENTS['KdV1_single_soliton'] = dict(
     config="""TAG      = 'kdv1'
 EQUATION = 'kdv'
 VARIANT  = 'ce_poly'   # vanilla | hard_bc | ce_poly | ce_helm
-SMOKE    = True
+SMOKE    = False
 
 K_SOL    = 1.0
 MU       = 0.0         # KdV has no dispersion parameter; kept for the config
@@ -363,7 +363,7 @@ EXPERIMENTS['KdV2_two_soliton'] = dict(
     config="""TAG      = 'kdv2'
 EQUATION = 'kdv'
 VARIANT  = 'ce_poly'
-SMOKE    = True
+SMOKE    = False
 
 K1, K2   = 1.0, 2.0
 MU       = 0.0
@@ -428,7 +428,7 @@ EXPERIMENTS['RLW2_two_soliton'] = dict(
     config="""TAG      = 'rlw2'
 EQUATION = 'rlw'
 VARIANT  = 'ce_helm'
-SMOKE    = True
+SMOKE    = False
 
 EPS, MU  = 1.0, 1.0
 C1_AMP, C2_AMP = 5.33 / 3.0, 1.69 / 3.0
@@ -496,7 +496,7 @@ EXPERIMENTS['RLW3_undular_bore'] = dict(
     config="""TAG      = 'rlw3'
 EQUATION = 'rlw'
 VARIANT  = 'ce_helm'
-SMOKE    = True
+SMOKE    = False
 
 EPS, MU  = 1.5, 1.0 / 6.0
 U0, XC, DSTEP = 0.1, 0.0, 5.0

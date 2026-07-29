@@ -31,9 +31,10 @@ def run_notebook(path):
     mod.__dict__['__name__'] = '__nbmain__'
     sys.modules['__nbmain__'] = mod
     for i, src in enumerate(cells):
-        # force SMOKE and keep the run tiny
-        if 'SMOKE    =' in src or 'SMOKE   =' in src:
-            src = src.replace('SMOKE    = True', 'SMOKE    = True')
+        # Force smoke mode whatever the notebook ships with. The shipped
+        # default is False so a Kaggle upload runs for real; locally we only
+        # need to know the cells execute, and a full run would take hours.
+        src = src.replace('SMOKE    = False', 'SMOKE    = True')
         exec(compile(src, f'{os.path.basename(path)}:cell{i}', 'exec'),
              mod.__dict__)
     return mod.__dict__
