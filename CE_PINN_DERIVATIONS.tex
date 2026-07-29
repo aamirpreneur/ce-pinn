@@ -103,7 +103,7 @@ Conserved integrals:
 \begin{align}
 I_1 &= \int u \dx && \text{(mass, \emph{linear})}, \label{eq:rlw-i1}\\
 I_2 &= \int \big(u^2 + \mu u_x^2\big) \dx && \text{(momentum, \emph{derivative-dependent})}, \label{eq:rlw-i2}\\
-I_3 &= \int \big(u^3 + 3u^2\big) \dx && \text{(energy, \emph{polynomial})}. \label{eq:rlw-i3}
+I_3 &= \int \big(\varepsilon u^3 + 3u^2\big) \dx && \text{(energy, \emph{polynomial})}. \label{eq:rlw-i3}
 \end{align}
 
 \begin{remark}
@@ -111,6 +111,22 @@ Equation \eqref{eq:rlw-i2} is the central object of this work. The term
 $\mu\int u_x^2\dx$ makes $I_2$ \emph{derivative-dependent}. Every existing
 projection method is restricted to invariants of the form $\int \phi(u)\dx$ and
 therefore cannot enforce $I_2$.
+\end{remark}
+
+\begin{remark}[The $\varepsilon$ factor in $I_3$]
+Writing \eqref{eq:rlw} as $(1-\mu\partial_x^2)u_t = -\partial_x f(u)$ with
+$f(u) = u + \tfrac{\varepsilon}{2}u^2$, and setting
+$v = (1-\mu\partial_x^2)^{-1}f$ so that $u_t = -v_x$, gives
+\begin{equation}
+\frac{\mathrm d}{\mathrm dt}\int\Big(\tfrac12 u^2 + \tfrac{\varepsilon}{6}u^3\Big)\dx
+= \int f\,u_t \dx = -\int (v-\mu v_{xx})v_x\dx
+= -\tfrac12\big[v^2\big]_a^b + \tfrac{\mu}{2}\big[v_x^2\big]_a^b = 0
+\end{equation}
+for decaying data. Multiplying by six gives \eqref{eq:rlw-i3}. The factor
+$\varepsilon$ is not optional. With $\varepsilon = 1.5$, $\mu = 1/6$, a
+pseudospectral integration holds $\int(\varepsilon u^3+3u^2)\dx$ constant to
+$10^{-15}$ while $\int(u^3+3u^2)\dx$ drifts by $5\times10^{-4}$ over $t=5$.
+The two coincide only at $\varepsilon = 1$.
 \end{remark}
 
 Single solitary wave:
@@ -141,6 +157,57 @@ u(x,y,t) = \frac{4\big(-\xi^2 + y^2 + 1\big)}{\big(\xi^2+y^2+1\big)^2},
 \qquad \xi = x - 3t,
 \end{equation}
 for which $C_2 = 8\pi$ exactly.
+
+%==========================================================================
+\section{When are these quantities actually conserved?}
+%==========================================================================
+
+The integrals above are conserved on the whole line, or on a periodic domain.
+On a bounded interval they acquire boundary flux terms, and it is worth being
+explicit about this before building a method that pins them to constants.
+
+Integrating \eqref{eq:rlw} over $[a,b]$,
+\begin{equation}
+\frac{\mathrm d}{\mathrm dt}\int_a^b u \dx
+= -\Big[\,u + \tfrac{\varepsilon}{2}u^2 - \mu\,u_{xt}\,\Big]_a^b ,
+\label{eq:rlw-flux}
+\end{equation}
+and for KdV \eqref{eq:kdv},
+\begin{equation}
+\frac{\mathrm d}{\mathrm dt}\int_a^b u \dx
+= -\Big[\,3u^2 + u_{xx}\,\Big]_a^b .
+\end{equation}
+Analogous boundary terms appear for $I_2$ and $I_3$.
+
+\begin{remark}[Standing assumption]
+\label{rem:flux}
+Everything that follows assumes the boundary fluxes vanish, which holds for
+solitary waves on a domain wide enough that the solution has decayed at both
+ends, and for periodic data. Under that assumption $C_1$ and $C_2$ are genuine
+constants and projecting onto their initial values is meaningful.
+\end{remark}
+
+\begin{remark}[Where the assumption fails]
+\label{rem:bore-flux}
+It does not hold for the undular bore, whose left boundary is held at
+$u_0 = 0.1$ while the right boundary is zero. With a steady left state
+($u_{xt}\to0$), \eqref{eq:rlw-flux} gives
+\begin{equation}
+\frac{\mathrm d}{\mathrm dt}\int u \dx
+= u_0 + \tfrac{\varepsilon}{2}u_0^2 \approx 0.108
+\qquad (\varepsilon = 1.5),
+\end{equation}
+against $C_1 \approx 3.6$ on $[-36,300]$. Mass therefore grows by roughly
+$150\%$ over $T = 50$: it is injected at the left boundary, and $C_1$ is not
+constant. Enforcing the initial $C_1$ there would project onto the wrong
+target.
+
+A configuration of this kind needs time-dependent targets $C_1(t)$, $C_2(t)$
+obtained by integrating the flux, which is a straightforward extension of the
+Newton system (the targets simply move) but is not carried out here. The
+implementation reports the flux at set-up rather than silently enforcing a
+value that is not conserved.
+\end{remark}
 
 %==========================================================================
 \section{The PINN baseline \textbf{[PRIOR]}}
@@ -433,6 +500,18 @@ Therefore
 This is exactly the SDIFP standardisation transform. It is closed-form, $O(N)$,
 and matches the first two moments of the target.
 
+\begin{remark}[Degenerate cases]
+The closed forms above assume non-degenerate moments. Equation
+\eqref{eq:proj-quad} requires $\int\ut^2\dx > 0$ and $C_2 > 0$, and fixes the
+sign of the root by taking the positive branch, which keeps $\us$ aligned with
+$\ut$. Equation \eqref{eq:proj-joint} requires $\tilde\sigma > 0$, so $\ut$
+must not be constant, and $\sigma_0^2 = C_2/|\Om| - m_0^2 \geq 0$, which is the
+feasibility condition $C_2 \geq C_1^2/|\Om|$ (Cauchy--Schwarz, with equality
+only for constant $\us$). If $\tilde\sigma = \sigma_0 = 0$ the map is $0/0$ and
+should be read as the identity. Implementations clamp both variances away from
+zero.
+\end{remark}
+
 %==========================================================================
 \section{Why prior work cannot handle derivative-dependent invariants \textbf{[NEW analysis]}}
 %==========================================================================
@@ -446,10 +525,15 @@ I_2[\us] = \int \Big[(\us)^2 + \mu(\us_x)^2\Big]\dx = C_2 .
 
 \begin{proposition}[The optimal projection is not affine]
 \label{prop:not-affine}
-Let $\mu > 0$. The minimiser of $\int(\us-\ut)^2\dx$ subject to
+Let $\mu > 0$, and let $\ut$ be such that $\ut$ and $\ut_{xx}$ are linearly
+independent on $\Om$. Then the minimiser of $\int(\us-\ut)^2\dx$ subject to
 $\int\us\dx = C_1$ and $\int[(\us)^2+\mu(\us_x)^2]\dx = C_2$ has the form
-$\us = \alpha\ut + \beta$ with constants $\alpha,\beta$ \emph{only if} the second
-constraint is inactive.
+$\us = \alpha\ut + \beta$ with constants $\alpha,\beta$ \emph{only if} the
+second constraint is inactive.
+
+The independence hypothesis is generic but not automatic. It fails when
+$\ut_{xx} = a\ut + b$ for constants $a, b$, in which case an affine minimiser
+can occur with $\lambda_2 \neq 0$.
 \end{proposition}
 
 \begin{proof}
@@ -486,9 +570,15 @@ freedom to minimise $\|\us-\ut\|$. One can force an affine map to hit the
 on the constraint manifold, so it perturbs the solution more than necessary.
 
 \emph{(ii) Boundary conditions.} From \eqref{eq:affine},
-$\us(a) = \alpha\,\ut(a) + \beta = \alpha g_a + \beta$, which equals $g_a$ only
-if $\alpha = 1$ and $\beta = 0$. The affine projection therefore destroys the
-Dirichlet data established by Layer 1. This is the content of SDIFP Remark 4.6.
+$\us(a) = \alpha g_a + \beta$ and $\us(b) = \alpha g_b + \beta$. Preserving both
+requires $\alpha g_a + \beta = g_a$ and $\alpha g_b + \beta = g_b$. For
+$g_a \neq g_b$ these force $\alpha = 1$, $\beta = 0$, so only the identity
+preserves the data. For $g_a = g_b = g$ they collapse to the single condition
+$\beta = (1-\alpha)g$, which \emph{can} hold with $\alpha \neq 1$; in
+particular any map with $\beta = 0$ preserves homogeneous data. The affine
+projection sets $\beta = m_0 - \alpha\tilde m$, which satisfies neither
+condition in general, so non-homogeneous Dirichlet data is destroyed. This is
+the content of SDIFP Remark 4.6.
 \end{remark}
 
 %==========================================================================
@@ -657,6 +747,56 @@ $\sin\!\big(n\pi(x-a)/|\Om|\big)$ with eigenvalues $\big(n\pi/|\Om|\big)^2 > 0$.
 Hence $\mathcal{A}$ has eigenvalues $1 + \kappa(n\pi/|\Om|)^2 \geq 1 > 0$.
 \end{proof}
 
+\begin{proposition}[The projection is well posed only for $\lambda_2 \geq 0$]
+\label{prop:wellposed}
+The second variation of $\mathcal{J}$ at a stationary point, taken over
+admissible $v$ with $v(a)=v(b)=0$, is
+\begin{equation}
+\delta^2\mathcal{J}[v]
+= 2\int v^2\dx + 2\lambda_2\int\big(v^2 + \mu v_x^2\big)\dx
+= 2\int\Big[(1+\lambda_2)v^2 + \lambda_2\mu\,v_x^2\Big]\dx .
+\end{equation}
+For $\lambda_2 \geq 0$ this is non-negative and the stationary point is a
+minimum. For $\lambda_2 < 0$ it can be made negative by taking $v$ with
+$\int v_x^2$ large relative to $\int v^2$, i.e.\ a high-frequency perturbation,
+so the stationary point is not a minimum.
+\end{proposition}
+
+\begin{remark}[What goes wrong, and what to do about it]
+\label{rem:lam2neg}
+The sign of $\lambda_2$ is set by the data: $\lambda_2 > 0$ when
+$I_2[\ut] > C_2$ and the projection must \emph{reduce} the derivative content,
+$\lambda_2 < 0$ when it must \emph{increase} it.
+
+In the second case the continuous problem may have no minimiser at all. One can
+add oscillations of vanishing amplitude and growing frequency which raise
+$\int u_x^2$ to any prescribed level while changing $\ut$ arbitrarily little in
+$L^2$, so the infimum is approached but not attained. Consistently with
+Proposition \ref{prop:wellposed}, the operator
+$\mathcal{I}-\kappa\partial_x^2$ with $\kappa<0$ is
+$\mathcal{I}+|\kappa|\partial_x^2$, which is indefinite.
+
+On a grid a minimiser exists, because the mesh caps the available frequency,
+but the problem is ill conditioned. The discrete Laplacian has eigenvalues down
+to $-4/\Delta x^2$, so positive definiteness survives only while
+$|\kappa| < \Delta x^2/4$, that is
+\begin{equation}
+\lambda_2 \;\geq\; \lambda_2^{\min}
+:= \frac{\kappa_{\min}}{\mu - \kappa_{\min}},
+\qquad \kappa_{\min} = -\tfrac{1}{4}\Delta x^2 .
+\label{eq:lam2min}
+\end{equation}
+The implementation clamps $\lambda_2$ at \eqref{eq:lam2min} (with a safety
+factor) and records when the clamp binds, which is the honest reading: the
+target is not attainable by an elliptic projection on that grid. In practice
+this is rare, because an undertrained network carries excess roughness and
+therefore excess $I_2$, putting it on the well-posed branch $\lambda_2 > 0$.
+The Helmholtz projection is best understood as a \emph{smoothing} projection.
+
+Note also that $\lambda_2 = -1$ must be excluded outright, since the normalised
+form \eqref{eq:helm-normalised} divides by $1+\lambda_2$.
+\end{remark}
+
 \begin{remark}[Boundary conditions are preserved exactly]
 Unlike the affine projection, \eqref{eq:helmholtz} carries Dirichlet data as part
 of the boundary value problem. The projected solution satisfies
@@ -730,7 +870,7 @@ $\{d_i\}$:
 \paragraph{Forward elimination.}
 \begin{align}
 c'_1 &= \frac{c_1}{b_1}, &  d'_1 &= \frac{d_1}{b_1}, \\
-c'_i &= \frac{c_i}{b_i - a_i c'_{i-1}}, &
+c'_i &= \frac{c_i}{b_i - a_i c'_{i-1}}\ \ (i \le N-1), &
 d'_i &= \frac{d_i - a_i d'_{i-1}}{b_i - a_i c'_{i-1}},
 \qquad i = 2,\dots,N .
 \end{align}
@@ -777,6 +917,24 @@ F_2(\lambda_1,\lambda_2) = \bm{q}^\top\Big[\bm{\us}\odot\bm{\us}
 \label{eq:discrete-F}
 \end{equation}
 where $\odot$ denotes elementwise product.
+
+\begin{remark}[Consistency of the discrete objects]
+Three discrete choices have to agree: the quadrature $\bm q$, the derivative
+$\bm{D}$ inside the invariant, and the stencil inside the Helmholtz matrix. The
+reference value $C_2$ must be computed with the same $\bm q$ and $\bm{D}$ used
+in the constraint, otherwise the discrete target is not attainable and Newton
+converges to a residual floor rather than to zero.
+
+The pairing here is second-order throughout: the three-point Laplacian in
+$\bm{A}$, the matching central difference in $F_2$, and trapezoidal weights.
+This is a consistent finite-difference discretisation of the continuous
+projection, and Newton drives $F_1 = F_2 = 0$ exactly, so the \emph{discrete}
+invariants are conserved to machine precision. It is not, however, an exactly
+structure-preserving discrete variational projection: that would call for
+summation-by-parts operators satisfying a discrete integration-by-parts
+identity compatible with $\bm q$. The higher-order operators used for the PDE
+residual are deliberately kept separate from these.
+\end{remark}
 
 %==========================================================================
 \section{The Newton system for the multipliers \textbf{[NEW]}}
@@ -933,8 +1091,24 @@ Section \ref{sec:backward} collapse into a projector.
 \item Solve $\bm{A}\bm{\us} = \bm{h}$.
 \item Compute $\bm{D}\bm{\us}$ and evaluate $F_1, F_2$ from \eqref{eq:discrete-F}.
 \item If $|F_1| + |F_2| < \epsilon_{\text{tol}}$, go to step 10.
-\item Solve $\bm{A}\bm{p}_1 = \bm{e}_{-1/2}$ and
-      $\bm{A}\bm{p}_2 = \bm{e}_{\mu\us_{xx}-\us}$, both with zero boundary rows.
+\item Solve $\bm{A}\bm{p}_1 = \bm{d}^{(1)}$ and
+      $\bm{A}\bm{p}_2 = \bm{d}^{(2)}$, where the boundary rows are zero and,
+      for $2\le i\le N-1$,
+      \begin{equation}
+      d^{(1)}_i = \frac{-1/2}{1+\lambda_2},
+      \qquad
+      d^{(2)}_i = \frac{\mu\,\delta_{xx}\us_i - \us_i}{1+\lambda_2} .
+      \end{equation}
+      The factor $1/(1+\lambda_2)$ is essential. The matrix $\bm{A}$
+      discretises the \emph{normalised} operator
+      $\mathcal{I}-\kappa\partial_x^2$, whereas \eqref{eq:p1} and
+      \eqref{eq:p2} are stated for the unnormalised
+      $\mathcal{H} = (1+\lambda_2)(\mathcal{I}-\kappa\partial_x^2)$. Dropping
+      it inflates $\bm{P}$, and therefore $\bm{J}$, by a factor $1+\lambda_2$,
+      corrupting both the Newton update and the backward projector. The
+      stencil $\delta_{xx}$ must likewise be the same three-point operator
+      that appears in $\bm{A}$; a wider stencil makes $\bm p_2$ inconsistent
+      with the system and stalls the iteration.
 \item Assemble $\bm{R}$ from \eqref{eq:rvectors} and $\bm{J} = \bm{R}^\top\bm{P}$.
 \item Update $\bm\lambda \leftarrow \bm\lambda - \bm{J}^{-1}\bm{F}$; return to step 2.
 \item Recompute $\bm{p}_1,\bm{p}_2,\bm{R},\bm{J}$ at the converged $\bm\lambda$
@@ -1186,24 +1360,35 @@ For $C_3 = \int\big(u^3 - \tfrac12 u_x^2\big)\dx$, the variation of each piece i
 \delta\!\int\!-\tfrac12(\us_x)^2\dx = -\int \us_x v_x\dx = \int \us_{xx}v\dx ,
 \end{equation}
 so adding $\lambda_3 G_3$ to the Lagrangian contributes
-$\lambda_3\big(3(\us)^2 + \us_{xx}\big)$ to \eqref{eq:el-raw}, giving
+$\lambda_3\big(3(\us)^2 + \us_{xx}\big)$. For KdV the momentum
+$C_2 = \int u^2\dx$ carries \emph{no} derivative, so the $\lambda_2$ constraint
+contributes only $2\lambda_2\us$ and the stationarity condition is
 \begin{equation}
-2(\us-\ut) + \lambda_1 + 2\lambda_2\us - 2\lambda_2\mu\us_{xx}
+2(\us-\ut) + \lambda_1 + 2\lambda_2\us
 + \lambda_3\Big(3(\us)^2 + \us_{xx}\Big) = 0 .
 \end{equation}
-The term $3\lambda_3(\us)^2$ is \emph{nonlinear} in $\us$, so the Euler--Lagrange
-equation is a nonlinear ODE. No single linear solve suffices; Newton on the full
-$N$-dimensional system would be required, with the associated convergence and
-cost concerns.
+There is no $\lambda_2\mu\us_{xx}$ term here; that belongs to RLW's $I_2$, not
+to KdV. The term $3\lambda_3(\us)^2$ is nonlinear in $\us$, so the
+Euler--Lagrange equation is a nonlinear ODE. No single linear solve suffices,
+and Newton on the full $N$-dimensional system would be required.
 
 \subsection{RLW energy}
 
-For $I_3 = \int(u^3+3u^2)\dx$ the contribution is
-$\lambda_3\big(3(\us)^2 + 6\us\big)$, containing no derivative. The
-Euler--Lagrange equation is then a pointwise \emph{quadratic} in $\us$, solvable
-in closed form node by node, but the resulting constraint equation for
-$\lambda_3$ remains nonlinear and requires scalar root-finding nested inside the
-existing Newton iteration.
+For $I_3 = \int(\varepsilon u^3+3u^2)\dx$ the contribution is
+$\lambda_3\big(3\varepsilon(\us)^2 + 6\us\big)$, which contains no derivative.
+Taken \emph{in isolation} the stationarity condition would be a pointwise
+quadratic in $\us$, solvable node by node.
+
+That is not the CE-PINN situation, because $I_2$ is enforced at the same time
+and supplies the elliptic term. The condition for hard $I_1$, $I_2$ and $I_3$
+together is
+\begin{equation}
+2(\us-\ut) + \lambda_1 + 2\lambda_2\us - 2\lambda_2\mu\,\us_{xx}
++ \lambda_3\Big(3\varepsilon(\us)^2 + 6\us\Big) = 0 ,
+\end{equation}
+a \emph{semilinear elliptic} boundary value problem. The term
+$-2\lambda_2\mu\us_{xx}$ couples neighbouring nodes, so there is no node-by-node
+solution unless $\lambda_2 = 0$ or $\mu = 0$.
 
 \subsection{Decision}
 
@@ -1257,7 +1442,7 @@ C_1 = \bm{q}^\top\bm{f},
 \qquad
 C_2 = \bm{q}^\top\Big[\bm{f}\odot\bm{f} + \mu(\bm{D}\bm{f})\odot(\bm{D}\bm{f})\Big],
 \qquad
-C_3 = \bm{q}^\top\Big[\bm{f}^{\odot3} + 3\,\bm{f}\odot\bm{f}\Big].
+C_3 = \bm{q}^\top\Big[\varepsilon\,\bm{f}^{\odot3} + 3\,\bm{f}\odot\bm{f}\Big].
 \end{equation}
 Using the same quadrature for the reference values and for the constraints
 ensures the discrete constraints are exactly satisfiable.
