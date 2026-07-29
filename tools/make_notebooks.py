@@ -97,18 +97,59 @@ print('Run:', RUN_NAME)"""
 def push_cell(tag):
     return f"""# Push results to GitHub, only if the run produced finite numbers.
 # A crashed notebook never reaches this cell, so bad runs cannot be stored.
-if ON_KAGGLE and trainer.is_run_valid():
-    with open(os.path.expanduser('~/.git-credentials'), 'w') as f:
-        f.write(f'https://x-access-token:{{GITHUB_TOKEN}}@github.com\\n')
-    subprocess.run(['git', 'config', '--global', 'credential.helper', 'store'], check=True)
-    subprocess.run(['git', 'config', '--global', 'user.email', 'aamir@auto.local'], check=True)
-    subprocess.run(['git', 'config', '--global', 'user.name', 'aamir-kaggle'], check=True)
+#
+# The push is a convenience, not the safety net: everything is already under
+# /kaggle/working/{{OUT_DIR}}, which Kaggle keeps in the notebook's Output tab.
+# A failed push therefore never costs a run.
+
+def _push():
+    import shutil, datetime, urllib.request, json as _json
+    if not ON_KAGGLE:
+        print('Not on Kaggle, skipping push.')
+        return
+    if not trainer.is_run_valid():
+        print('Run produced NaN/Inf, skipping push.')
+        return
+
+    token = GITHUB_TOKEN.strip()
+
+    # Check the credentials before touching git, so a bad token gives a clear
+    # message instead of "Authentication failed" from deep inside a clone.
+    try:
+        req = urllib.request.Request(
+            'https://api.github.com/repos/aamirpreneur/ce-pinn',
+            headers={{'Authorization': 'Bearer ' + token,
+                     'Accept': 'application/vnd.github+json'}})
+        with urllib.request.urlopen(req) as r:
+            info = _json.load(r)
+        if not info.get('permissions', {{}}).get('push'):
+            print('Token is valid but has no push permission on this repo.')
+            return
+        print('Token OK, repo', info['full_name'])
+    except Exception as e:
+        print('GITHUB_TOKEN was rejected:', e)
+        print('  - a 401 means the token is expired or mistyped')
+        print('  - a 404 on a private repo means it lacks "repo" scope,')
+        print('    or is a fine-grained token without access to ce-pinn')
+        print(f'Results remain in /kaggle/working/{{OUT_DIR}} (Output tab).')
+        return
+
+    url = f'https://x-access-token:{{token}}@github.com/aamirpreneur/ce-pinn.git'
+    subprocess.run(['git', 'config', '--global', 'user.email',
+                    'aamir@auto.local'], check=True)
+    subprocess.run(['git', 'config', '--global', 'user.name',
+                    'aamir-kaggle'], check=True)
     os.chdir('/kaggle/working')
     subprocess.run(['rm', '-rf', '/kaggle/working/repo'])
-    subprocess.run(['git', 'clone', '--depth', '1', '{REPO}',
-                    '/kaggle/working/repo'], check=True)
+    # capture output so the URL, which carries the token, is never echoed
+    c = subprocess.run(['git', 'clone', '--depth', '1', url,
+                        '/kaggle/working/repo'], capture_output=True)
+    if c.returncode != 0:
+        print('Clone failed (details suppressed to avoid leaking the token).')
+        print(f'Results remain in /kaggle/working/{{OUT_DIR}} (Output tab).')
+        return
+
     os.chdir('/kaggle/working/repo')
-    import shutil, datetime
     ts = datetime.datetime.utcnow().strftime('%Y%m%d-%H%M%S')
     dest = f'results/{{RUN_NAME}}/{{ts}}'
     os.makedirs(dest, exist_ok=True)
@@ -116,10 +157,14 @@ if ON_KAGGLE and trainer.is_run_valid():
         shutil.copy2(f'/kaggle/working/{{OUT_DIR}}/{{fl}}', dest)
     subprocess.run(['git', 'add', '-A', 'results'])
     subprocess.run(['git', 'commit', '-m', f'results({{RUN_NAME}}/{{ts}})'])
-    subprocess.run(['git', 'push', 'origin', 'main'])
-    print('Pushed to', dest)
-else:
-    print('Skipping push:', 'not on Kaggle' if not ON_KAGGLE else 'run invalid')"""
+    p = subprocess.run(['git', 'push', 'origin', 'main'], capture_output=True)
+    if p.returncode == 0:
+        print('Pushed to', dest)
+    else:
+        print('Push failed (details suppressed).')
+        print(f'Results remain in /kaggle/working/{{OUT_DIR}} (Output tab).')
+
+_push()"""
 
 
 # ---------------------------------------------------------------------------
