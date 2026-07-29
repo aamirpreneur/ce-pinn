@@ -92,6 +92,17 @@ class GridTrainer:
     def _gb(self, t):
         return float(self.gb_fn(t)) if self.gb_fn else self.gb0
 
+    def _dga(self, t, h=1e-6):
+        """g_a'(t), needed by the tangent when the boundary data moves."""
+        if self.ga_fn is None:
+            return 0.0
+        return (float(self.ga_fn(t + h)) - float(self.ga_fn(t - h))) / (2 * h)
+
+    def _dgb(self, t, h=1e-6):
+        if self.gb_fn is None:
+            return 0.0
+        return (float(self.gb_fn(t + h)) - float(self.gb_fn(t - h))) / (2 * h)
+
     def _invariants(self, u):
         """Discrete (I1, I2, I3) using the same quadrature as the constraints."""
         cfg = self.cfg
@@ -209,7 +220,9 @@ class GridTrainer:
         else:
             raise ValueError(f"unknown projection {kind!r}")
 
-        u_star_t = proj.project_tangent(u_tilde_t, st)
+        u_star_t = proj.project_tangent(u_tilde_t, st,
+                                        dga=self._dga(t_val),
+                                        dgb=self._dgb(t_val))
         return u_star, u_star_t, st
 
     def _residual(self, u, u_t):

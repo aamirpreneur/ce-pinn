@@ -183,6 +183,12 @@ and for KdV \eqref{eq:kdv},
 \end{equation}
 Analogous boundary terms appear for $I_2$ and $I_3$.
 
+In the implementation these are evaluated from the boundary data alone,
+dropping $\mu u_{xt}$ for RLW and $u_{xx}$ for KdV, both of which are
+negligible for a solution that has flattened at the domain edge. The check is
+therefore a screen for the leading term rather than an exact flux budget; for
+non-decaying boundary data it would need the discrete curvature at the ends.
+
 \begin{remark}[Standing assumption]
 \label{rem:flux}
 Everything that follows assumes the boundary fluxes vanish, which holds for
@@ -259,7 +265,8 @@ Define, with $s = \dfrac{x-a}{b-a} \in [0,1]$,
 \begin{align}
 A(x,t) &= f(x) + (1-s)\big[g_a(t)-g_a(0)\big] + s\big[g_b(t)-g_b(0)\big],
 \label{eq:A}\\
-B(x,t) &= t\,(x-a)(b-x),
+B(x,t) &= \frac{t}{T}\,\frac{4(x-a)(b-x)}{(b-a)^2}
+= \frac{t}{T}\,4s(1-s),
 \label{eq:B}
 \end{align}
 and set
@@ -267,6 +274,17 @@ and set
 \boxed{\ \ut(x,t;\theta) = A(x,t) + B(x,t)\,N(x,t;\theta). \ }
 \label{eq:hardbc}
 \end{equation}
+
+\begin{remark}[Normalisation of the mask]
+The unnormalised choice $B = t(x-a)(b-x)$ has the same zero set and is the
+form usually quoted, but its magnitude is $T\big((b-a)/2\big)^2$, which is
+about $5\times10^4$ on the RLW domain $[-40,60]$ with $T=20$ and about
+$10^6$ for the KP box. The untrained network is then amplified by four to six
+orders of magnitude, and the first residual evaluation overflows into the
+$10^{14}$ range. Dividing by $T$ and by $\big((b-a)/2\big)^2$ leaves $B$
+peaking at $1$ at the domain centre at $t=T$ and changes nothing structural:
+$B$ still vanishes at $t=0$ and at both ends.
+\end{remark}
 
 \subsection{Verification (all three conditions)}
 
@@ -925,10 +943,12 @@ the central-difference first-derivative matrix,
 \begin{equation}
 (\bm{D}\bm{w})_i = \frac{w_{i+1}-w_{i-1}}{2\Delta x}\ \ (2\le i\le N-1),
 \qquad
-(\bm{D}\bm{w})_1 = \frac{w_2-w_1}{\Delta x},
+(\bm{D}\bm{w})_1 = \frac{-3w_1+4w_2-w_3}{2\Delta x},
 \qquad
-(\bm{D}\bm{w})_N = \frac{w_N-w_{N-1}}{\Delta x}.
+(\bm{D}\bm{w})_N = \frac{3w_N-4w_{N-1}+w_{N-2}}{2\Delta x},
 \end{equation}
+so $\bm{D}$ is second-order central in the interior and second-order one-sided
+at the two end nodes.
 The discrete constraints are then
 \begin{equation}
 F_1(\lambda_1,\lambda_2) = \bm{q}^\top\bm{\us} - C_1,
@@ -1143,12 +1163,28 @@ iterate. They must be recomputed at the converged multipliers, otherwise the
 gradient of Section \ref{sec:backward} is evaluated at the wrong point.
 \end{remark}
 
-\begin{remark}[Convergence]
+\begin{remark}[Convergence and starting point]
 Newton's method converges quadratically near the solution provided $\bm{J}$ is
 non-singular, which holds whenever the constraint gradients $\bm{r}_1,\bm{r}_2$
 are linearly independent, i.e.\ whenever the two constraints are not degenerate.
-During training the network changes slowly between steps, so warm-starting
-$\bm\lambda$ typically reduces the iteration count to one or two.
+
+The starting point matters more than it might appear. From $\bm\lambda = 0$ the
+iteration has to travel to $\lambda_2$ of order $30$ at late times, which needs
+many damped steps and can stray onto the ill-posed branch $\lambda_2 < 0$.
+Dropping the elliptic term gives the affine relation
+$I_2[\us]\approx I_2[\ut]/(1+\lambda_2)^2$, which inverts to
+\begin{equation}
+\lambda_2^{(0)} = \sqrt{\frac{I_2[\ut]}{C_2}} - 1,
+\qquad
+\lambda_1^{(0)} = \frac{2}{|\Om|}\Big(\textstyle\int\ut\dx
+- \big(1+\lambda_2^{(0)}\big)C_1\Big).
+\end{equation}
+This costs two quadratures and brings every time level to convergence within
+about seven iterations. It is preferred here to warm-starting from the previous
+training step: $\lambda_2$ varies strongly with $t$, from near zero at $t=0$ to
+tens at late times, so a multiplier cached at one time level is a poor guess at
+another when the levels are sampled at random. A backtracking line search
+guards the remaining cases.
 \end{remark}
 
 %==========================================================================
@@ -1348,6 +1384,24 @@ single reverse-mode pass with $\bm 1$ as the seed returns the entire vector.
 The coupling is introduced only by the projection, and \eqref{eq:tangent}
 accounts for it.
 
+\subsection{Moving boundary data}
+
+If $g_a$ and $g_b$ depend on $t$, the tangent inherits their derivatives.
+Differentiating $\bm{A}\bm{\us} = \bm{h}$ in $t$, the interior rows of the
+right-hand side carry $\mathrm d\ut/\mathrm dt$ divided by $1+\lambda_2$, while
+the two boundary rows carry $g_a'(t)$ and $g_b'(t)$ directly, since
+$h_1 = g_a$ and $h_N = g_b$. Hence
+\begin{equation}
+\bm{M}\bm v \;=\; \bm{A}^{-1}\bm{\rho},
+\qquad
+\rho_1 = g_a'(t),\quad
+\rho_N = g_b'(t),\quad
+\rho_i = \frac{v_i}{1+\lambda_2}\ \ (2\le i\le N-1),
+\end{equation}
+and $\us_t$ follows from \eqref{eq:tangent} as before. Setting the boundary
+rows of $\bm\rho$ to zero, which is correct only for static data, would force
+$\us_t(a,t) = 0$ and contradict $\us(a,t) = g_a(t)$.
+
 \subsection{Higher derivatives and cost}
 
 Spatial derivatives of the tangent follow from the fixed difference matrices,
@@ -1492,13 +1546,45 @@ solution unless $\lambda_2 = 0$ or $\mu = 0$.
 
 \subsection{Decision}
 
-$I_3$ is enforced as a soft penalty,
+$I_3$ is enforced as a soft penalty in relative form,
 \begin{equation}
 \mathcal{L}_{\text{soft}} = \frac{1}{N_t}\sum_{k=1}^{N_t}
-\Big(I_3\big[\us(\cdot,t_k)\big] - C_3\Big)^2 ,
+\left(\frac{I_3\big[\us(\cdot,t_k)\big] - C_3}{C_3}\right)^{\!2} ,
 \end{equation}
-and hard enforcement of $I_3$ is stated as future work. The contribution of this
+so that the weight $w_3$ does not have to absorb the scale of $C_3$, which
+differs by orders of magnitude between the test problems. The penalty is
+applied during the Adam phase and switched off for L-BFGS, so the final
+descent minimises the PDE residual alone; this follows common practice for
+conservation penalties and is a training choice, not a consequence of the
+derivation. Hard enforcement of $I_3$ is stated as future work. The contribution of this
 paper is the hard enforcement of $I_1$ and the derivative-dependent $I_2$.
+
+%==========================================================================
+\section{How the residual is evaluated \textbf{[NEW]}}
+%==========================================================================
+
+A standard PINN evaluates the residual at scattered collocation points by
+automatic differentiation. That does not compose with a projection, because
+the projection is a global operation on a spatial grid: there is no way to
+project at an isolated point $(x_i,t_i)$ without the whole profile at $t_i$.
+
+The residual is therefore evaluated on the same grid the projection uses. Each
+training step draws $N_t$ time levels; at each level the network is evaluated
+on the full spatial grid, Layer 1 and Layer 2 are applied, and the residual is
+formed on the projected field $\us$. Spatial derivatives come from
+finite-difference matrices, and the time derivative from
+Section~\ref{sec:tangent}.
+
+Two families of difference operators are used, deliberately kept apart. The
+projection uses second-order operators throughout: the three-point Laplacian
+inside $\bm{A}$, and the matching $\bm{D}$ above inside the invariant. Changing
+either would break the correspondence between the discrete constraint and the
+discrete Euler--Lagrange equation. The PDE residual uses fourth-order interior
+stencils for $u_x$ and $u_{xx}$, and a fourth-order stencil for $u_{xxx}$ in
+the KdV case, because residual accuracy is limited by these and not by the
+projection. The outermost few nodes, where the one-sided stencils are less
+accurate, are excluded from the residual norm; the hard boundary layer already
+pins the solution there.
 
 %==========================================================================
 \section{The complete CE-PINN architecture \textbf{[NEW]}}
@@ -1574,12 +1660,17 @@ $\int(u^2+\mu u_x^2)\dx$ (derivative)     & \textbf{No} & \textbf{No} & \textbf{
 $\int(u^3-\tfrac12u_x^2)\dx$ (derivative) & \textbf{No} & \textbf{No} & Analysed; soft \\
 Hard Dirichlet boundary conditions        & No (Neumann only) & No (shifts boundary) & \textbf{Yes} \\
 Projection preserves BCs                  & --- & No & \textbf{Yes, structurally} \\
-Exact gradient through the projection     & Closed form & Closed form & \textbf{IFT + adjoint} \\
+Exact gradient through the projection     & Closed form & Closed form & \textbf{IFT + adjoint}$^\dagger$ \\
 Two-dimensional demonstration             & Advection only & High-$d$ linear & \textbf{KP} \\
 \bottomrule
 \end{tabular}
 \caption{Capability comparison. The rows in bold are the contribution of this
-work. ``Projection preserves BCs'' refers to the Helmholtz projection, where
+work. $^\dagger$The gradient of $\us$ with respect to $\ut$ is exact, by the
+implicit function theorem. The tangent map $\ut_t \mapsto \us_t$ is exact at
+the current state, but the state is frozen when the residual is differentiated
+with respect to $\theta$, so the end-to-end parameter gradient omits the
+second-order dependence of the projector on $\ut$. ``Projection preserves
+BCs'' refers to the Helmholtz projection, where
 the Dirichlet data enters as part of the elliptic boundary value problem. The
 affine projection does not preserve non-homogeneous Dirichlet data, and
 preserves homogeneous data only when $\beta = 0$; that applies equally to the

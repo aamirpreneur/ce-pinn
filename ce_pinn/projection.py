@@ -369,14 +369,21 @@ class _HelmholtzApply(torch.autograd.Function):
 # Tangent propagation: d(u*)/dt from d(u~)/dt
 # ---------------------------------------------------------------------------
 
-def project_tangent(v, st):
+def project_tangent(v, st, dga=0.0, dgb=0.0):
     """Apply the projection Jacobian to a tangent vector.
 
     Because u*(t) = P(u~(t)), the chain rule gives
         du*/dt = (dP/du~) du~/dt = (I - Pi) M v,
-    with M = A^{-1} E / (1 + lam2) and Pi = P J^{-1} R^T. This is exact for the
-    tangent. The state is held fixed, so second-order dependence of the
-    Jacobian on u~ is not differentiated through during backpropagation.
+    with Pi = P J^{-1} R^T. This is exact for the tangent. The state is held
+    fixed, so second-order dependence of the Jacobian on u~ is not
+    differentiated through during backpropagation.
+
+    Args:
+        dga, dgb: time derivatives of the boundary data, g_a'(t) and g_b'(t).
+            The projected field satisfies u*(a,t) = g_a(t) exactly, so its
+            tangent must satisfy u*_t(a,t) = g_a'(t). Leaving these at zero
+            (correct only for time-independent boundary data) would silently
+            produce the wrong tangent for a moving boundary.
     """
     if st.kind == 'polynomial':
         vol = st.vol
@@ -387,10 +394,13 @@ def project_tangent(v, st):
                 * (st.u_tilde - st.m_tilde)
                 + st.alpha * (v - dm))
 
-    Ev = v.clone()
-    Ev[0] = 0.0
-    Ev[-1] = 0.0
-    Mv = torch.linalg.solve(st.A, Ev) / st.coeff
+    # Differentiating A u* = h in t: the interior rows carry v/(1+lam2), the
+    # boundary rows carry the derivatives of the boundary data themselves.
+    rhs = v / st.coeff
+    rhs = rhs.clone()
+    rhs[0] = dga
+    rhs[-1] = dgb
+    Mv = torch.linalg.solve(st.A, rhs)
     s = st.R.T @ Mv
     z = torch.linalg.solve(st.J, s)
     return Mv - st.P @ z

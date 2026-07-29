@@ -209,6 +209,57 @@ check("polynomial tangent == FD", num / den < 1e-5, f"rel err={num/den:.3e}")
 
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+print("\n8. tangent with time-dependent boundary data")
+# ---------------------------------------------------------------------------
+# The boundary values themselves move, so u*_t(a) must equal g_a'(t). Zeroing
+# the boundary rows of the tangent (correct only for static data) gets this
+# wrong; the check below fails if that regression returns.
+GA_OF_T = lambda tt: 0.05 + 0.01 * tt          # g_a'(t) = 0.01
+GB_OF_T = lambda tt: 0.0
+
+def u_bc(tval):
+    ramp = GA_OF_T(tval) * (1.0 - (x - XA) / (XB - XA))
+    return rlw_soliton(x, tval) + ramp
+
+t0, ht = 2.0, 1e-6
+ub = u_bc(t0)
+C1c = torch.dot(q, ub)
+# Ask for LESS I2, not more. Requiring more puts lam2 on the negative branch
+# where the continuous problem has no minimiser (Prop. 4), the clamp binds,
+# and F != 0 -- so the tangent identity, which assumes stationarity, does not
+# apply. That is a property of the problem, not of the tangent code.
+C2c = invariant_i2(ub, q, D1c, MU) * 0.98
+vt = (u_bc(t0 + ht) - u_bc(t0 - ht)) / (2 * ht)
+
+_, stb = helmholtz_projection(ub, C1c, C2c, MU, dx, q, D1c,
+                              ga=GA_OF_T(t0), gb=GB_OF_T(t0))
+check("fixture is on the well-posed branch (lam2 > 0, converged)",
+      stb.lam[1] > 0 and not stb.clamped and stb.residual < 1e-10,
+      f"lam2={stb.lam[1]:.3e} clamped={stb.clamped} resid={stb.residual:.1e}")
+dga = (GA_OF_T(t0 + ht) - GA_OF_T(t0 - ht)) / (2 * ht)
+tan_bc = project_tangent(vt, stb, dga=dga, dgb=0.0)
+
+# reference: finite difference of the projection, boundaries moving too
+pp = helmholtz_projection(u_bc(t0 + ht), C1c, C2c, MU, dx, q, D1c,
+                          ga=GA_OF_T(t0 + ht), gb=GB_OF_T(t0 + ht))[0]
+pm = helmholtz_projection(u_bc(t0 - ht), C1c, C2c, MU, dx, q, D1c,
+                          ga=GA_OF_T(t0 - ht), gb=GB_OF_T(t0 - ht))[0]
+tan_bc_fd = (pp - pm) / (2 * ht)
+
+num = float((tan_bc - tan_bc_fd).abs().max())
+den = float(tan_bc_fd.abs().max())
+check("moving-boundary tangent == FD", num / den < 1e-4, f"rel err={num/den:.3e}")
+check("tangent reproduces g_a'(t) at the boundary",
+      abs(float(tan_bc[0]) - dga) < 1e-9,
+      f"u*_t(a)={float(tan_bc[0]):.6f} vs g_a'={dga:.6f}")
+
+stale = project_tangent(vt, stb)          # the old behaviour: dga defaulted to 0
+check("zeroed-boundary tangent is detectably wrong (regression guard)",
+      abs(float(stale[0]) - dga) > 1e-6,
+      f"gives u*_t(a)={float(stale[0]):.6f}, should be {dga:.6f}")
+
+
 print(f"\n{'='*58}")
 print(f"{len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:
