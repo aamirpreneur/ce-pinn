@@ -99,7 +99,7 @@ class _State:
     """Everything needed to apply the projection Jacobian to a tangent."""
     __slots__ = ('kind', 'A', 'P', 'R', 'J', 'coeff', 'u_star', 'u_tilde',
                  'q', 'D1c', 'mu', 'alpha', 'm_tilde', 'sigma_tilde',
-                 'sigma0', 'vol', 'newton_iters', 'residual', 'lam')
+                 'sigma0', 'vol', 'newton_iters', 'residual', 'lam', 'clamped')
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +141,7 @@ def polynomial_projection(u_tilde, C1, C2, q):
     st.newton_iters = 0
     st.residual = 0.0
     st.lam = (0.0, 0.0)
+    st.clamped = False
     return u_star, st
 
 
@@ -167,9 +168,27 @@ def _initial_guess(u_tilde, C1, C2, mu, q, D1c):
     i2 = float(invariant_i2(u_tilde, q, D1c, mu))
     c2 = float(C2)
     ratio = i2 / c2 if c2 > 0 else 1.0
-    lam2 = max((ratio ** 0.5) - 1.0, -0.9) if ratio > 0 else 0.0
+    lam2 = (ratio ** 0.5) - 1.0 if ratio > 0 else 0.0
     lam1 = 2.0 * (float(torch.dot(q, u_tilde)) - (1.0 + lam2) * float(C1)) / vol
     return lam1, lam2
+
+
+def lam2_lower_bound(mu, dx, safety=0.9):
+    """Smallest lam2 for which the discrete operator stays positive definite.
+
+    For lam2 < 0 the coefficient kappa = lam2*mu/(1+lam2) is negative and
+    A = I - kappa*D2 becomes I + |kappa|*D2. The discrete Laplacian D2 has
+    eigenvalues down to -4/dx^2, so A loses positive definiteness once
+    |kappa| exceeds dx^2/4. Inverting kappa(lam2) at kappa = -safety*dx^2/4
+    gives the bound below.
+
+    Negative lam2 is the legitimate case where the field carries too little
+    I2 and has to be amplified, but the amplification an elliptic operator can
+    supply on a given grid is limited. Clamping here keeps a rare bad step
+    from producing a near-singular solve.
+    """
+    kappa_min = -safety * dx * dx / 4.0
+    return kappa_min / (mu - kappa_min)
 
 
 def _newton_solve(u_tilde, C1, C2, mu, dx, q, D1c, ga, gb, tol, max_iter,
@@ -183,13 +202,13 @@ def _newton_solve(u_tilde, C1, C2, mu, dx, q, D1c, ga, gb, tol, max_iter,
     """
     N = u_tilde.shape[0]
     device, dtype = u_tilde.device, u_tilde.dtype
+    lam2_min = lam2_lower_bound(mu, dx)
     if lam_init is None:
         lam1, lam2 = _initial_guess(u_tilde, C1, C2, mu, q, D1c)
-        lam1 = torch.as_tensor(lam1, device=device, dtype=dtype)
-        lam2 = torch.as_tensor(lam2, device=device, dtype=dtype)
     else:
-        lam1 = torch.as_tensor(lam_init[0], device=device, dtype=dtype)
-        lam2 = torch.as_tensor(lam_init[1], device=device, dtype=dtype)
+        lam1, lam2 = float(lam_init[0]), float(lam_init[1])
+    lam1 = torch.as_tensor(lam1, device=device, dtype=dtype)
+    lam2 = torch.as_tensor(max(lam2, lam2_min), device=device, dtype=dtype)
     D2c = central_d2_matrix(N, dx, device, dtype)
 
     A = None
@@ -240,9 +259,8 @@ def _newton_solve(u_tilde, C1, C2, mu, dx, q, D1c, ga, gb, tol, max_iter,
         for _ in range(30):
             l1 = lam1 + step * dlam[0]
             l2 = lam2 + step * dlam[1]
-            if float(l2) <= -0.999:
-                step *= 0.5
-                continue
+            if float(l2) < lam2_min:
+                l2 = torch.as_tensor(lam2_min, device=device, dtype=dtype)
             cf = 1.0 + l2
             kp = l2 * mu / cf
             At = build_helmholtz_matrix(N, kp, dx, device, dtype)
@@ -257,7 +275,7 @@ def _newton_solve(u_tilde, C1, C2, mu, dx, q, D1c, ga, gb, tol, max_iter,
                 break
             step *= 0.5
         lam1 = lam1 + step * dlam[0]
-        lam2 = lam2 + step * dlam[1]
+        lam2 = torch.clamp(lam2 + step * dlam[1], min=lam2_min)
 
     # Recompute sensitivities AT the converged multipliers. Inside the loop
     # they are produced before the next convergence test, so on exit they
@@ -282,6 +300,12 @@ def _newton_solve(u_tilde, C1, C2, mu, dx, q, D1c, ga, gb, tol, max_iter,
     st = _State()
     st.kind = 'helmholtz'
     st.lam = (float(lam1), float(lam2))
+    # lam2 sitting on its lower bound means the target C2 exceeds what an
+    # elliptic projection can supply on this grid. That is a well-posedness
+    # limit, not a solver failure: for lam2 < 0 the second variation
+    # 2*int[(1+lam2)v^2 + lam2*mu*v_x^2] is negative for high-frequency v, so
+    # the continuous problem has no minimiser.
+    st.clamped = bool(float(lam2) <= lam2_min + 1e-12)
     st.A = A
     st.P = P
     st.R = R

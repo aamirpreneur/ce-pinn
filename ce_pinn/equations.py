@@ -25,21 +25,55 @@ def kdv_one_soliton_torch(x, t, k=1.0):
 
 
 def kdv_two_soliton(x, t, k1=1.0, k2=2.0):
-    """Hirota bilinear: u = 2 d^2/dx^2 ln f, log-sum-exp for stability."""
-    th1 = k1 * x - k1**3 * t
-    th2 = k2 * x - k2**3 * t
-    a12 = ((k1 - k2) / (k1 + k2))**2
-    log_a12 = np.log(a12)
+    """Hirota bilinear two-soliton, u = 2 d^2/dx^2 ln f.
 
-    terms = np.array([np.zeros_like(x), th1, th2, th1 + th2 + log_a12])
-    max_t = terms.max(axis=0)
-    log_f = max_t + np.log(np.exp(terms - max_t).sum(axis=0))
+    Differentiated analytically rather than by finite differences, so the
+    result is exact and the function works for an input of any length. The
+    previous finite-difference version needed at least two grid points and
+    failed when the hard-BC layer evaluated the initial condition at a single
+    boundary node.
 
-    dx = x[1] - x[0] if x.ndim == 1 else 1e-5
-    f = np.exp(log_f)
-    fx = np.gradient(f, dx, axis=-1)
-    fxx = np.gradient(fx, dx, axis=-1)
-    return (fxx * f - fx**2) * 2.0 / f**2
+    All four exponentials are factored by their common maximum before
+    exponentiating, which keeps the intermediate values in range.
+    """
+    x = np.asarray(x, dtype=float)
+    th1 = k1 * x - k1 ** 3 * t
+    th2 = k2 * x - k2 ** 3 * t
+    a12 = ((k1 - k2) / (k1 + k2)) ** 2
+
+    # exponents of the four terms of f, with their x-derivative coefficients
+    e = np.stack([np.zeros_like(x), th1, th2, th1 + th2 + np.log(a12)])
+    c1 = np.array([0.0, k1, k2, k1 + k2]).reshape(-1, *([1] * x.ndim))
+
+    m = e.max(axis=0)
+    w = np.exp(e - m)                 # weights relative to the largest term
+
+    f = w.sum(axis=0)
+    fx = (c1 * w).sum(axis=0)
+    fxx = (c1 ** 2 * w).sum(axis=0)
+
+    # the common factor exp(m) cancels in (f_xx f - f_x^2)/f^2
+    return 2.0 * (fxx * f - fx ** 2) / f ** 2
+
+
+def kdv_two_soliton_torch(x, t, k1=1.0, k2=2.0):
+    """Torch version of the analytic two-soliton solution."""
+    th1 = k1 * x - k1 ** 3 * t
+    th2 = k2 * x - k2 ** 3 * t
+    a12 = ((k1 - k2) / (k1 + k2)) ** 2
+
+    e = torch.stack([torch.zeros_like(x), th1, th2,
+                     th1 + th2 + float(np.log(a12))])
+    c1 = torch.tensor([0.0, k1, k2, k1 + k2], dtype=x.dtype,
+                      device=x.device).reshape(-1, *([1] * x.dim()))
+
+    m = e.max(dim=0).values
+    w = torch.exp(e - m)
+
+    f = w.sum(dim=0)
+    fx = (c1 * w).sum(dim=0)
+    fxx = (c1 ** 2 * w).sum(dim=0)
+    return 2.0 * (fxx * f - fx ** 2) / f ** 2
 
 
 def kdv_exact_invariants(k=1.0):
@@ -79,10 +113,14 @@ def rlw_undular_bore_ic(x, u0=0.1, xc=0.0, d=5.0):
 
 
 def rlw_invariants_numpy(u, ux, dx, eps=1.0, mu=1.0):
-    """Compute I1, I2, I3 for RLW from discrete arrays."""
+    """Compute I1, I2, I3 for RLW from discrete arrays.
+
+    I3 = int(eps*u^3 + 3u^2) dx. The eps factor matters whenever eps != 1
+    (the undular bore uses eps = 1.5); dropping it makes I3 drift.
+    """
     I1 = _trapz(u, dx=dx)
     I2 = _trapz(u**2 + mu * ux**2, dx=dx)
-    I3 = _trapz(u**3 + 3.0 * u**2, dx=dx)
+    I3 = _trapz(eps * u**3 + 3.0 * u**2, dx=dx)
     return I1, I2, I3
 
 
@@ -125,10 +163,11 @@ def kp_line_soliton_torch(x, y, t, k1=1.0, m1=0.0, sigma=-3.0):
 # Conservation law computation (torch, differentiable)
 # ---------------------------------------------------------------------------
 
-def compute_invariants_1d(u, x, dx, mu=None):
+def compute_invariants_1d(u, x, dx, mu=None, eps=1.0):
     """Compute conservation integrals for 1D solutions.
     If mu is None: KdV-style (C1=int u, C2=int u^2, C3=int(u^3 - 0.5*ux^2))
-    If mu is given: RLW-style (I1=int u, I2=int(u^2+mu*ux^2), I3=int(u^3+3u^2))
+    If mu is given: RLW-style (I1=int u, I2=int(u^2+mu*ux^2),
+                               I3=int(eps*u^3 + 3u^2))
     """
     ux = torch.gradient(u, spacing=(dx,), dim=-1)[0]
     C1 = torch.trapezoid(u, dx=dx)
@@ -137,5 +176,5 @@ def compute_invariants_1d(u, x, dx, mu=None):
         C3 = torch.trapezoid(u**3 - 0.5 * ux**2, dx=dx)
     else:
         C2 = torch.trapezoid(u**2 + mu * ux**2, dx=dx)
-        C3 = torch.trapezoid(u**3 + 3.0 * u**2, dx=dx)
+        C3 = torch.trapezoid(eps * u**3 + 3.0 * u**2, dx=dx)
     return C1, C2, C3

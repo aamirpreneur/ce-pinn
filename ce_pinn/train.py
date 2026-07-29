@@ -50,7 +50,8 @@ class GridTrainer:
         self.global_step = 0
         self.use_wandb = HAS_WANDB and bool(os.environ.get("WANDB_API_KEY"))
         self._lam_cache = None          # warm start for Newton
-        self._newton_failures = 0
+        self._newton_failures = 0   # diverged
+        self._newton_clamped = 0    # lam2 on its well-posedness bound
 
         eq = config['equation']
         self.ops = GridOps(config['xa'], config['xb'], config['n_grid'],
@@ -65,6 +66,7 @@ class GridTrainer:
 
         self._setup_bc()
         self._compute_reference_invariants()
+        self._check_boundary_flux()
         self._save_config()
 
     # ------------------------------------------------------------------
@@ -97,7 +99,12 @@ class GridTrainer:
         I1 = torch.dot(self.q, u)
         if cfg['equation'] == 'rlw':
             I2 = torch.dot(self.q, u * u + cfg['mu'] * ux * ux)
-            I3 = torch.dot(self.q, u ** 3 + 3.0 * u * u)
+            # I3 = int(eps*u^3 + 3u^2). The eps factor is required for
+            # eps != 1: writing the equation as (1-mu*d_xx)u_t = -d_x f with
+            # f = u + (eps/2)u^2 gives d/dt int(u^2/2 + eps*u^3/6) = 0.
+            # Verified numerically against a pseudospectral solve at eps=1.5,
+            # where int(u^3+3u^2) drifts by 5e-4 over t=5 and this does not.
+            I3 = torch.dot(self.q, cfg['eps'] * u ** 3 + 3.0 * u * u)
         else:
             I2 = torch.dot(self.q, u * u)
             I3 = torch.dot(self.q, u ** 3 - 0.5 * ux * ux)
@@ -110,6 +117,48 @@ class GridTrainer:
         print(f"Reference invariants: C1={self.C1_ref:.8f}, "
               f"C2={self.C2_ref:.8f}, C3={self.C3_ref:.8f}")
         print(f"Boundary values: ga={self.ga0:.6e}, gb={self.gb0:.6e}")
+
+    def _check_boundary_flux(self):
+        """Warn if the invariants are not actually conserved on this domain.
+
+        On a finite interval the conservation laws carry boundary flux terms.
+        For RLW, integrating the equation gives
+
+            d/dt int_a^b u dx = -[ u + (eps/2) u^2 - mu u_xt ]_a^b,
+
+        and for KdV, -[ 3u^2 + u_xx ]_a^b. These vanish when the solution
+        decays to zero at both ends, which is the soliton case. They do not
+        vanish for the undular bore, whose left boundary is held at u0 = 0.1:
+        mass is injected steadily and C1 is not constant.
+
+        Enforcing a constant C1 in that situation projects onto the wrong
+        target. Such a case needs time-dependent targets C1(t), C2(t) built
+        from the flux, which is not implemented here, so this only reports
+        the problem rather than hiding it.
+        """
+        cfg = self.cfg
+        ga, gb = self.ga0, self.gb0
+        if cfg['equation'] == 'rlw':
+            # u_xt is taken as zero, valid for a steady boundary state
+            fa = ga + 0.5 * cfg['eps'] * ga * ga
+            fb = gb + 0.5 * cfg['eps'] * gb * gb
+        else:
+            fa, fb = 3.0 * ga * ga, 3.0 * gb * gb
+        dC1dt = -(fb - fa)
+        rel = abs(dC1dt) * cfg['T'] / (abs(self.C1_ref) + 1e-30)
+        self.flux_dC1dt = dC1dt
+        # 0.1% over the whole run: below this the soliton tails are simply
+        # not exactly zero at the truncated domain edge, which is harmless.
+        if rel > 1e-3:
+            print(f"WARNING: boundary flux is non-zero. dC1/dt = {dC1dt:.4e}, "
+                  f"which moves C1 by {100*rel:.1f}% over T={cfg['T']}.")
+            print("         The invariants are NOT conserved on this domain, so "
+                  "projecting onto\n         the initial C1 and C2 enforces the "
+                  "wrong target. Time-dependent\n         targets are needed "
+                  "for this configuration.")
+        else:
+            print(f"Boundary flux negligible (dC1/dt = {dC1dt:.2e}); "
+                  f"invariants are conserved.")
 
     def _save_config(self):
         c = {k: v for k, v in self.cfg.items() if not callable(v)}
@@ -149,7 +198,10 @@ class GridTrainer:
             # cached from another time level is a worse start than the
             # analytic guess computed inside the solver.
             if st.residual >= max(self.cfg.get('newton_tol', 1e-12), 1e-10):
-                self._newton_failures += 1
+                if st.clamped:
+                    self._newton_clamped += 1
+                else:
+                    self._newton_failures += 1
         elif kind == 'polynomial':
             C2_poly = self.cfg['C2_poly_ref']
             u_star, st = proj.polynomial_projection(
@@ -264,6 +316,8 @@ class GridTrainer:
         msg = f"[{phase} {step}/{total}] total={loss_total:.6e} pde={loss_pde:.6e}"
         if self._newton_failures:
             msg += f" newton_fail={self._newton_failures}"
+        if self._newton_clamped:
+            msg += f" clamped={self._newton_clamped}"
         if 'I2_drift' in e:
             msg += f" I2drift={e['I2_drift']:.3e} bc={e['bc_err']:.2e}"
         print(msg, flush=True)
@@ -280,7 +334,7 @@ class GridTrainer:
             total.backward()
             opt.step()
             if step % log_every == 0 or step == 1:
-                self._log('Adam', step, n_iter, float(total), float(lp),
+                self._log('Adam', step, n_iter, float(total.detach()), float(lp),
                           float(li))
         self._save_history()
 
@@ -326,6 +380,8 @@ class GridTrainer:
         res = {'C1_drift': drift[0], 'C2_drift': drift[1], 'C3_drift': drift[2],
                'bc_error': bc_err, 'best_pde_loss': self.best_loss,
                'total_steps': self.global_step,
+               'newton_failures': self._newton_failures,
+               'newton_clamped': self._newton_clamped,
                'C1_ref': self.C1_ref, 'C2_ref': self.C2_ref,
                'C3_ref': self.C3_ref}
 
