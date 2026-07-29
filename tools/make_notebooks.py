@@ -8,9 +8,11 @@ regeneration overwrites it.
 
 Run:  py -3 tools/make_notebooks.py
 """
+import hashlib
 import json
 import os
 import re
+import subprocess
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(ROOT, 'ce_pinn')
@@ -53,6 +55,33 @@ def library_cells():
     return cells
 
 
+def code_fingerprint():
+    """Hash of the numerical source that this notebook will carry.
+
+    Only the four files that can change a number are hashed. Documentation,
+    tests and tooling are excluded deliberately: a result stays valid across
+    those, and treating them as invalidating would force needless reruns.
+
+    The digest is written into results.json for every run, so any archived
+    result can be traced to the exact numerical code that produced it, and
+    two results can be compared for whether they are even commensurable.
+    """
+    h = hashlib.sha256()
+    for mod in MODULES:
+        h.update(open(os.path.join(LIB, mod), 'rb').read())
+    digest = h.hexdigest()[:12]
+    try:
+        commit = subprocess.check_output(
+            ['git', 'rev-parse', '--short', 'HEAD'], cwd=ROOT,
+            stderr=subprocess.DEVNULL).decode().strip()
+        dirty = bool(subprocess.check_output(
+            ['git', 'status', '--porcelain', '--'] + [f'ce_pinn/{m}' for m in MODULES],
+            cwd=ROOT, stderr=subprocess.DEVNULL).decode().strip())
+    except Exception:
+        commit, dirty = 'unknown', False
+    return digest, commit, dirty
+
+
 def code(src):
     return {"cell_type": "code", "metadata": {}, "source": src,
             "execution_count": None, "outputs": []}
@@ -91,7 +120,8 @@ wandb.init(project='ce-pinn', name=RUN_NAME, config=dict(
     xa=XA, xb=XB, T=T_FINAL, n_grid=N_GRID, n_t=N_T,
     layers=HIDDEN_LAYERS, width=HIDDEN_WIDTH,
     adam=ADAM_ITER, lbfgs=LBFGS_ITER, lam_i3=LAM_I3))
-print('Run:', RUN_NAME)"""
+print('Run:', RUN_NAME)
+print('Code version:', CODE_VERSION, '| commit:', CODE_COMMIT)"""
 
 
 def push_cell(tag):
@@ -542,7 +572,9 @@ if trainer._newton_failures:
 EVAL_CELL = """results = trainer.evaluate(EXACT_FN)
 results.update(variant=VARIANT, seed=SEED, smoke=SMOKE,
                training_time_s=elapsed,
-               newton_failures=trainer._newton_failures)
+               newton_failures=trainer._newton_failures,
+               newton_clamped=trainer._newton_clamped,
+               code_version=CODE_VERSION, code_commit=CODE_COMMIT)
 json.dump(results, open(os.path.join(OUT_DIR, 'results.json'), 'w'), indent=2)
 wandb.finish()
 
@@ -559,7 +591,18 @@ def build_notebook(name, spec, libcells):
     cells.append(code(SECRETS))
     cells.append(md("## Configuration\n\nEverything you would normally change "
                     "lives in this cell."))
-    cells.append(code(spec['config'] + "\nSEED     = 0"))
+    fp, commit, dirty = code_fingerprint()
+    stamp = (
+        "\nSEED     = 0\n"
+        "\n# Provenance of the numerical code inlined below, written into\n"
+        "# results.json so any archived result can be traced to the exact\n"
+        "# version that produced it. Documentation, test and tooling changes\n"
+        "# do not move this hash and do not invalidate a run.\n"
+        f"CODE_VERSION = '{fp}'\n"
+        f"CODE_COMMIT  = '{commit}'"
+        + ("\nprint('WARNING: built from uncommitted numerics')" if dirty else "")
+    )
+    cells.append(code(spec['config'] + stamp))
     cells.append(code(PRELUDE))
     cells.append(md("## Library (generated, do not edit here)"))
     for c in libcells:

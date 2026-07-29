@@ -1,0 +1,82 @@
+# Experiment protocol
+
+The problem this solves: code kept changing while experiments were running, so
+it was never clear whether a result was still valid. This is the rule for
+deciding that, and the process for avoiding the question in the first place.
+
+## What invalidates a result
+
+Only changes to the five numerical modules can change a number:
+
+```
+ce_pinn/equations.py    ce_pinn/network.py    ce_pinn/train.py
+ce_pinn/operators.py    ce_pinn/projection.py
+```
+
+Everything else is inert as far as results are concerned: the derivations
+document, the README, tests, `tools/`, comments, notebook prose. A fix to any
+of those never requires a rerun.
+
+`tools/make_notebooks.py` hashes exactly those five files into `CODE_VERSION`,
+which is printed at the top of every run and written into every `results.json`.
+Two results are comparable if and only if their `CODE_VERSION` matches. To find
+what a stored result was produced by:
+
+```bash
+python -c "import json;d=json.load(open('results/<run>/<ts>/results.json'));print(d['code_version'], d['code_commit'])"
+```
+
+## What does not invalidate a result, even when the numerics change
+
+A numerical change only invalidates the experiments whose code path it
+actually touches. Record that reach explicitly rather than rerunning
+everything.
+
+## The cycle
+
+1. **Freeze.** Tag the current numerics: `git tag -a exp-vN -m "..."`.
+2. **Generate** notebooks from the tagged state and upload them to Kaggle. Each
+   notebook carries its own inlined copy of the library, so later edits to
+   `ce_pinn/` cannot reach a run already in flight.
+3. **Run** the batch. During this window no numerical edits land on `main`.
+   Audit findings are recorded below and applied afterwards, not immediately.
+4. **Apply** all queued findings in one pass, re-verify, tag `exp-v(N+1)`.
+5. **Rerun** only the experiments the change log marks as invalidated.
+
+The failure mode to avoid is fix, audit, fix, audit, which never terminates and
+leaves every run of uncertain provenance.
+
+## Change log
+
+Each numerical change records which experiments it invalidates. Anything not
+listed here changed no numbers.
+
+| Date | Change | Numerical? | Invalidates |
+|---|---|---|---|
+| 2026-07-29 | Grid-based residual; projection moved into the forward pass | yes | everything before it (the projection had no effect on training at all) |
+| 2026-07-29 | Hard-BC mask normalised to O(1) | yes | every `hard_bc`, `ce_poly`, `ce_helm`, `ce_full` run |
+| 2026-07-29 | `vanilla` given IC/BC penalties | yes | `vanilla` only |
+| 2026-07-29 | `I3 = int(eps*u^3 + 3u^2)`, was missing `eps` | yes | **RLW3 only** (eps=1.5). RLW1, RLW2, KdV1, KdV2 all use eps=1 and are unaffected |
+| 2026-07-29 | Analytic Newton start, damped line search, lam2 clamp | yes | nothing already valid: removes non-convergence, does not move a converged answer |
+| 2026-07-29 | KdV two-soliton IC differentiated analytically | yes | KdV2 only |
+| 2026-07-29 | Boundary tangent `g_a'(t)`, `g_b'(t)` | yes | nothing — no experiment uses time-varying boundary data |
+| 2026-07-29 | Three audit passes on the derivations document | no | nothing |
+| 2026-07-29 | Push-cell token check, `.gitignore` fix, provenance stamp | no | nothing |
+
+## Known gaps, carried deliberately
+
+**RLW3 conservation targets.** The bore injects mass at the left boundary at
+`dC1/dt = 0.108`, which moves `C1` by about 150% over `T=50`. The invariants are
+not constant, so projecting onto their initial values enforces the wrong
+target. The trainer prints this at set-up. RLW3 conservation numbers are not
+publishable until time-dependent `C1(t)`, `C2(t)` are implemented; its boundary
+error and solution accuracy are still meaningful.
+
+**KP.** No 2D trainer. The stale notebooks were removed rather than left
+broken.
+
+**End-to-end gradient.** Exact for `du*/du~` and for the tangent at fixed
+state; the projector state is frozen when differentiating with respect to the
+network parameters, so second-order dependence is dropped. Standard practice,
+and stated as such in the derivations document rather than claimed as fully
+exact.
