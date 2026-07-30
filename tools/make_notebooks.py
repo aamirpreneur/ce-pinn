@@ -493,7 +493,8 @@ EXPERIMENTS['RLW2_two_soliton'] = dict(
            "L2=0.53 and the second was indistinguishable from `ce_helm`."),
     config="""TAG      = 'rlw2'
 EQUATION = 'rlw'
-VARIANT  = 'ce_helm'
+# Run 1 of 5. Then SEED=1, SEED=2, then VARIANT='ce_poly', 'ce_helm'.
+VARIANT  = 'hard_bc'
 SMOKE    = False
 
 EPS, MU  = 1.0, 1.0
