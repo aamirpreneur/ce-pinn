@@ -2,6 +2,13 @@ __pycache__/
 *.pyc
 tests/_tmp/
 tests/_nbtmp/
+# scratch dirs written by the post-hoc analysis tools in tools/
+tests/_analysis_tmp/
+tests/_why_tmp/
+tests/_inf_tmp/
+tests/_needgood_tmp/
+tests/_lr/
+tests/_ref601/
 
 # results/ is deliberately NOT ignored. The push cell archives run outputs
 # there, and ignoring it made `git add -A results` a silent no-op on Kaggle:
