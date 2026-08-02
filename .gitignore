@@ -9,6 +9,19 @@ tests/_inf_tmp/
 tests/_needgood_tmp/
 tests/_lr/
 tests/_ref601/
+# scratch dirs from the theory verification and the Phase 0 gate
+tests/_theory_tmp/
+tests/_rlw1bias/
+tests/_rlw2diag/
+tests/_thm3/
+tests/_thm3b/
+tests/_thm3c/
+tests/_thm3d/
+tests/_anorm/
+tests/_bcchk/
+tests/_h1l2/
+tests/_probe/
+tests/_phase0/
 
 # results/ is deliberately NOT ignored. The push cell archives run outputs
 # there, and ignoring it made `git add -A results` a silent no-op on Kaggle:

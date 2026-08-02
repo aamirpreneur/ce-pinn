@@ -125,9 +125,39 @@ class GridTrainer:
         with torch.no_grad():
             C1, C2, C3 = self._invariants(self.ic_vals)
         self.C1_ref, self.C2_ref, self.C3_ref = (float(C1), float(C2), float(C3))
+        # Targets may be time-dependent. On a finite interval the invariants
+        # are only conserved when the boundary flux vanishes; where it does
+        # not, projecting onto the *initial* values enforces the wrong target
+        # and the exact solution is no longer a fixed point of the projection,
+        # which shows up as an additive error floor rather than one that
+        # vanishes with the network error. Supplying C1_fn, C2_fn, C3_fn
+        # removes it. Absent them the behaviour is unchanged: constants.
+        self.C1_fn = self.cfg.get('C1_fn')
+        self.C2_fn = self.cfg.get('C2_fn')
+        self.C3_fn = self.cfg.get('C3_fn')
+        self.C2_poly_fn = self.cfg.get('C2_poly_fn')
+        self.time_dependent_targets = any(
+            f is not None for f in (self.C1_fn, self.C2_fn, self.C3_fn))
         print(f"Reference invariants: C1={self.C1_ref:.8f}, "
               f"C2={self.C2_ref:.8f}, C3={self.C3_ref:.8f}")
+        if self.time_dependent_targets:
+            names = [n for n, f in (('C1', self.C1_fn), ('C2', self.C2_fn),
+                                    ('C3', self.C3_fn)) if f is not None]
+            print(f"Time-dependent targets supplied for: {', '.join(names)}")
         print(f"Boundary values: ga={self.ga0:.6e}, gb={self.gb0:.6e}")
+
+    def _C1(self, t):
+        return float(self.C1_fn(t)) if self.C1_fn else self.C1_ref
+
+    def _C2(self, t):
+        return float(self.C2_fn(t)) if self.C2_fn else self.C2_ref
+
+    def _C3(self, t):
+        return float(self.C3_fn(t)) if self.C3_fn else self.C3_ref
+
+    def _C2poly(self, t):
+        return (float(self.C2_poly_fn(t)) if self.C2_poly_fn
+                else self.cfg['C2_poly_ref'])
 
     def _check_boundary_flux(self):
         """Warn if the invariants are not actually conserved on this domain.
@@ -160,23 +190,35 @@ class GridTrainer:
         self.flux_dC1dt = dC1dt
         # 0.1% over the whole run: below this the soliton tails are simply
         # not exactly zero at the truncated domain edge, which is harmless.
-        if rel > 1e-3:
+        if rel > 1e-3 and not self.time_dependent_targets:
             print(f"WARNING: boundary flux is non-zero. dC1/dt = {dC1dt:.4e}, "
                   f"which moves C1 by {100*rel:.1f}% over T={cfg['T']}.")
             print("         The invariants are NOT conserved on this domain, so "
                   "projecting onto\n         the initial C1 and C2 enforces the "
-                  "wrong target. Time-dependent\n         targets are needed "
-                  "for this configuration.")
+                  "wrong target. Supply C1_fn,\n         C2_fn in the config to "
+                  "track them.")
+        elif rel > 1e-3:
+            print(f"Boundary flux is non-zero (dC1/dt = {dC1dt:.2e}) but "
+                  f"time-dependent targets\nare supplied, so the moving value "
+                  f"is tracked rather than assumed constant.")
         else:
             print(f"Boundary flux negligible (dC1/dt = {dC1dt:.2e}); "
                   f"invariants are conserved.")
 
     def _save_config(self):
         c = {k: v for k, v in self.cfg.items() if not callable(v)}
+        # Callables are dropped from the record, so note which were supplied --
+        # otherwise a stored config cannot be told apart from one that used
+        # constant targets or frozen boundary data.
         c.update(C1_ref=self.C1_ref, C2_ref=self.C2_ref, C3_ref=self.C3_ref,
-                 ga0=self.ga0, gb0=self.gb0, device=str(self.device))
-        json.dump(c, open(os.path.join(self.out_dir, "config.json"), "w"),
-                  indent=2)
+                 ga0=self.ga0, gb0=self.gb0, device=str(self.device),
+                 time_dependent_targets=self.time_dependent_targets,
+                 supplied_fns=sorted(k for k in ('ga_fn', 'gb_fn', 'C1_fn',
+                                                 'C2_fn', 'C3_fn',
+                                                 'C2_poly_fn')
+                                     if self.cfg.get(k) is not None))
+        with open(os.path.join(self.out_dir, "config.json"), "w") as f:
+            json.dump(c, f, indent=2)
 
     # ------------------------------------------------------------------
     # forward: one time level
@@ -200,8 +242,9 @@ class GridTrainer:
 
         if kind == 'helmholtz':
             u_star, st = proj.helmholtz_projection(
-                u_tilde, self.C1_ref, self.C2_ref, self.cfg['mu'], self.dx,
-                self.q, self.D1c, ga=self._ga(t_val), gb=self._gb(t_val),
+                u_tilde, self._C1(t_val), self._C2(t_val), self.cfg['mu'],
+                self.dx, self.q, self.D1c,
+                ga=self._ga(t_val), gb=self._gb(t_val),
                 tol=self.cfg.get('newton_tol', 1e-12),
                 max_iter=self.cfg.get('newton_max_iter', 50))
             # No cross-step multiplier cache: lam2 varies strongly with t
@@ -214,9 +257,8 @@ class GridTrainer:
                 else:
                     self._newton_failures += 1
         elif kind == 'polynomial':
-            C2_poly = self.cfg['C2_poly_ref']
             u_star, st = proj.polynomial_projection(
-                u_tilde, self.C1_ref, C2_poly, self.q)
+                u_tilde, self._C1(t_val), self._C2poly(t_val), self.q)
         else:
             raise ValueError(f"unknown projection {kind!r}")
 
@@ -260,8 +302,9 @@ class GridTrainer:
                 # scale of C3, guarded because C3 can legitimately vanish for
                 # some initial data (it is 0.2, 2.58 and 6.6 in the present
                 # test problems, but nothing forces it to be non-zero).
-                scale = abs(self.C3_ref) + 1e-12
-                loss_i3 = loss_i3 + ((I3 - self.C3_ref) / scale) ** 2
+                C3_t = self._C3(t_val)
+                scale = abs(C3_t) + 1e-12
+                loss_i3 = loss_i3 + ((I3 - C3_t) / scale) ** 2
 
         loss_pde = loss_pde / n_t
         total = loss_pde + lam_soft_i3 * loss_i3 / n_t
@@ -299,15 +342,19 @@ class GridTrainer:
         kind = self.cfg.get('projection')
         if kind == 'helmholtz':
             u = proj.helmholtz_projection(
-                u_tilde, self.C1_ref, self.C2_ref, self.cfg['mu'], self.dx,
-                self.q, self.D1c, ga=self._ga(t_val), gb=self._gb(t_val))[0]
+                u_tilde, self._C1(t_val), self._C2(t_val), self.cfg['mu'],
+                self.dx, self.q, self.D1c,
+                ga=self._ga(t_val), gb=self._gb(t_val))[0]
         elif kind == 'polynomial':
             u = proj.polynomial_projection(
-                u_tilde, self.C1_ref, self.cfg['C2_poly_ref'], self.q)[0]
+                u_tilde, self._C1(t_val), self._C2poly(t_val), self.q)[0]
         else:
             u = u_tilde
         I1, I2, I3 = self._invariants(u)
-        refs = (self.C1_ref, self.C2_ref, self.C3_ref)
+        # Drift is measured against the target *at this time*, so with
+        # time-dependent targets it reports failure to track a moving value
+        # rather than failure to stay constant.
+        refs = (self._C1(t_val), self._C2(t_val), self._C3(t_val))
         drift = [abs(float(I) - R) / (abs(R) + 1e-30)
                  for I, R in zip((I1, I2, I3), refs)]
         bc_err = max(abs(float(u[0]) - self._ga(t_val)),
@@ -393,10 +440,10 @@ class GridTrainer:
             # Otherwise `model_best.pth` is the best of every log_every-th
             # step, which with log_every=200 can miss the real minimum by a
             # wide margin on a run that oscillates.
-            self._track_best(float(lp))
+            self._track_best(float(lp.detach()))
             if step % log_every == 0 or step == 1:
-                self._log('Adam', step, n_iter, float(total.detach()), float(lp),
-                          float(li), lr=cur)
+                self._log('Adam', step, n_iter, float(total.detach()),
+                          float(lp.detach()), float(li.detach()), lr=cur)
         self._save_history()
 
     def train_lbfgs(self, n_iter, lr=1.0, lam_soft_i3=0.0, log_every=20):
@@ -408,7 +455,10 @@ class GridTrainer:
             opt.zero_grad()
             total, lp, li = self._loss(lam_soft_i3)
             total.backward()
-            box[0], box[1], box[2] = float(total), float(lp), float(li)
+            # detach before float(): these still carry grad history at this
+            # point, and float() on such a tensor raises a UserWarning
+            box[0], box[1], box[2] = (float(total.detach()), float(lp.detach()),
+                                      float(li.detach()))
             return total
 
         for step in range(1, n_iter + 1):
@@ -423,8 +473,8 @@ class GridTrainer:
     # ------------------------------------------------------------------
 
     def _save_history(self):
-        json.dump(self.history,
-                  open(os.path.join(self.out_dir, "history.json"), "w"))
+        with open(os.path.join(self.out_dir, "history.json"), "w") as f:
+            json.dump(self.history, f)
 
     def _save_checkpoint(self, tag):
         torch.save({'model_state_dict': self.model.state_dict(),

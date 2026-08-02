@@ -99,7 +99,8 @@ class _State:
     """Everything needed to apply the projection Jacobian to a tangent."""
     __slots__ = ('kind', 'A', 'P', 'R', 'J', 'coeff', 'u_star', 'u_tilde',
                  'q', 'D1c', 'mu', 'alpha', 'm_tilde', 'sigma_tilde',
-                 'sigma0', 'vol', 'newton_iters', 'residual', 'lam', 'clamped')
+                 'sigma0', 'vol', 'newton_iters', 'residual', 'lam', 'clamped',
+                 'P_eff', 'R_eff', 'J_eff')
 
 
 # ---------------------------------------------------------------------------
@@ -277,6 +278,34 @@ def _newton_solve(u_tilde, C1, C2, mu, dx, q, D1c, ga, gb, tol, max_iter,
         lam1 = lam1 + step * dlam[0]
         lam2 = torch.clamp(lam2 + step * dlam[1], min=lam2_min)
 
+    # If lam2 ended on its bound, the two-constraint system has no solution:
+    # F2 = 0 is unreachable, the loop exits on max_iter, and lam1 is left at
+    # whatever the last Newton step produced -- a step computed on the
+    # assumption that lam2 would move, which it then did not. Measured on a
+    # clamped RLW fixture, F1 came out at -1.0 to -2.6 rather than 0, so
+    # *neither* constraint held and lam1 was not a function of u_tilde at all.
+    # No implicit-function adjoint exists for that map, at any rank.
+    #
+    # Pin lam2 and solve the remaining scalar equation F1(lam1) = 0 exactly.
+    # The solve is linear in its right-hand side and lam1 enters the
+    # right-hand side affinely, so F1 is affine in lam1 and one extra solve
+    # gives the root. I1 is then enforced exactly, I2 is not (it cannot be),
+    # lam1 is a genuine implicit function of u_tilde, and the rank-1 projector
+    # in `_HelmholtzApply.backward` is the correct adjoint rather than an
+    # approximation.
+    if bool(float(lam2) <= lam2_min + 1e-12):
+        cf = 1.0 + lam2
+        Ac = build_helmholtz_matrix(N, lam2 * mu / cf, dx, device, dtype)
+        h0 = (u_tilde / cf).clone()
+        h0[0], h0[-1] = ga, gb
+        u0 = torch.linalg.solve(Ac, h0)
+        d1 = torch.zeros(N, device=device, dtype=dtype)
+        d1[1:-1] = -0.5 / cf                    # d(rhs)/d(lam1), interior only
+        w1 = torch.linalg.solve(Ac, d1)
+        denom = torch.dot(q, w1)
+        if float(denom.abs()) > 1e-300:
+            lam1 = (C1 - torch.dot(q, u0)) / denom
+
     # Recompute sensitivities AT the converged multipliers. Inside the loop
     # they are produced before the next convergence test, so on exit they
     # correspond to the previous iterate.
@@ -310,6 +339,19 @@ def _newton_solve(u_tilde, C1, C2, mu, dx, q, D1c, ga, gb, tol, max_iter,
     st.P = P
     st.R = R
     st.J = J
+    # When the clamp binds, lam2 is *held* at its bound rather than determined
+    # by F2 = 0, so dlam2/du~ = 0: the second constraint no longer responds to
+    # a perturbation of the input. Applying the full rank-2 projector
+    # Pi = P J^-1 R^T on such a step assumes both multipliers move, and gives a
+    # descent direction that is wrong in the lam2 component. The consistent
+    # object is the rank-1 projector built from lam1 alone. Both the adjoint
+    # (`_HelmholtzApply.backward`) and the tangent (`project_tangent`) use
+    # these, so they stay consistent with each other by construction.
+    if st.clamped:
+        st.P_eff, st.R_eff = P[:, :1], R[:, :1]
+    else:
+        st.P_eff, st.R_eff = P, R
+    st.J_eff = st.R_eff.T @ st.P_eff
     st.coeff = coeff
     st.u_star = u_star
     st.u_tilde = u_tilde
@@ -317,7 +359,10 @@ def _newton_solve(u_tilde, C1, C2, mu, dx, q, D1c, ga, gb, tol, max_iter,
     st.D1c = D1c
     st.mu = mu
     st.newton_iters = n_iter
-    st.residual = resid
+    # Recompute at the multipliers actually returned. `resid` from the loop
+    # predates the clamped-lam1 correction above and would misreport it.
+    st.residual = float((torch.dot(q, u_star) - C1).abs()
+                        + (invariant_i2(u_star, q, D1c, mu) - C2).abs())
     return st
 
 
@@ -355,9 +400,9 @@ class _HelmholtzApply(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_out):
         st = ctx.state
-        s = st.P.T @ grad_out
-        z = torch.linalg.solve(st.J.T, s)
-        g_eff = grad_out - st.R @ z
+        s = st.P_eff.T @ grad_out
+        z = torch.linalg.solve(st.J_eff.T, s)
+        g_eff = grad_out - st.R_eff @ z
         w = torch.linalg.solve(st.A.T, g_eff)
         g_tilde = (w / st.coeff).clone()
         g_tilde[0] = 0.0
@@ -401,9 +446,9 @@ def project_tangent(v, st, dga=0.0, dgb=0.0):
     rhs[0] = dga
     rhs[-1] = dgb
     Mv = torch.linalg.solve(st.A, rhs)
-    s = st.R.T @ Mv
-    z = torch.linalg.solve(st.J, s)
-    return Mv - st.P @ z
+    s = st.R_eff.T @ Mv
+    z = torch.linalg.solve(st.J_eff, s)
+    return Mv - st.P_eff @ z
 
 
 # ---------------------------------------------------------------------------

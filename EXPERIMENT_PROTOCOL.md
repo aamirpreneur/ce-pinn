@@ -67,12 +67,67 @@ listed here changed no numbers.
 | 2026-07-29 | Adam budget 20000 -> 5000 (6000 for the two-soliton cases), L-BFGS 2000 -> 500 | config only | all runs must use one budget to be comparable |
 | 2026-07-30 | Post-hoc analysis tooling (`analyze_rlw1.py`, `diag_why_projection_costs.py`, `eval_project_at_inference.py`, `diag_projection_needs_good_field.py`) | no | nothing — reads stored checkpoints, writes no numerics |
 | 2026-07-30 | RLW2 reference solution (`make_rlw2_reference.py`, `results/reference/`) and its inlining into the RLW2 notebook | no | nothing — a new measuring stick, not a change to what is measured |
+| 2026-08-02 | Theory (`THEORY.md`), verification (`tools/verify_theory.py`), `check_rlw2_best.py` | no | nothing — reads stored checkpoints, proves statements about the existing operator |
+| 2026-08-02 | **exp-v4, Phase 0.** Time-dependent targets `C1_fn`/`C2_fn`/`C3_fn`; clamped-state solve made well-posed and its adjoint dropped to rank 1; `float()` detached; file handles closed | yes | **everything.** `CODE_VERSION` `e299b122b9be` -> `0c25c545396d`. See the reach note below |
+
+### Reach of the exp-v4 changes
+
+`CODE_VERSION` moves, so nothing before it is formally comparable. What
+actually changed, per experiment:
+
+* **Time-dependent targets.** Inert unless `C1_fn`/`C2_fn`/`C3_fn` are supplied.
+  Every completed run used constants and would reproduce bit-for-bit. The
+  *point* of the change is that new runs can supply them, which removes the
+  additive error floor (`THEORY.md` §5b) — verified here at exactly `0.0`
+  against `7.574e-06` with frozen data.
+* **Clamped-state solve.** Reaches only steps where the `lam2` clamp binds. The
+  cosine schedule fires it 0 times in 2500 steps, so the completed RLW1 sweep
+  is almost certainly untouched — `newton_clamped` is recorded per run and is
+  auditable.
+* **`float()` detach, file handles.** Cosmetic; no numerical reach.
+
+Practically: the completed RLW1 sweep is still *believable*, but it must be
+rerun under `exp-v4` before publication so that every reported number carries
+one code version and the boundary/target fix is actually in effect.
 
 `CODE_VERSION` is still `e299b122b9be` after all of the above, so the RLW2 runs
 will be directly comparable with the completed RLW1 sweep. That is the point of
 hashing only the five numerical modules.
 
 ## Queued for a later version
+
+*(Both entries below were resolved in exp-v4 on 2026-08-02. Kept for the
+record, with what the fix turned out to require.)*
+
+**~~Adjoint is inconsistent when the lam2 clamp binds.~~ FIXED — and the
+problem was larger than this entry described.** The entry assumed `lam1` was
+still determined by `F1 = 0` when the clamp binds, so that a rank-1 projector
+would be the correct adjoint. It is not. The Newton step is computed from the
+full 2x2 system and only `lam2` is clamped afterwards, so `lam1` takes a step
+predicated on `lam2` moving, which it then does not; the loop exits on
+`max_iter` and `lam1` is left wherever that put it. Measured on a clamped RLW
+fixture: `F1` came out between `-1.0` and `-2.6`, not `0`. **Neither constraint
+was satisfied and the forward map was the output of a truncated iteration**, so
+no implicit-function adjoint existed at any rank — a rank-1 projector alone
+fails a finite-difference check at 14% relative error.
+
+*Fix as applied:* pin `lam2` at its bound and solve the remaining scalar
+equation `F1(lam1) = 0` exactly. `F1` is affine in `lam1` (the solve is linear
+in its right-hand side), so one extra linear solve gives the root. `I1` is then
+enforced exactly, `I2` is not — it cannot be at the bound — and `lam1` becomes
+a genuine implicit function of `u_tilde`, which makes the rank-1 adjoint
+correct. Verified against finite differences at `2.1e-10` relative, with the
+old rank-2 projector failing the same check at `1.5e-02`. `tests/test_phase0.py`
+constructs a clamped state deliberately; no previous test reached one.
+
+**~~Cosmetic `requires_grad` warning.~~ FIXED.** `float()` now detaches in
+`train_adam` and `train_lbfgs`. `tests/test_phase0.py` runs both with warnings
+promoted to errors. Unclosed file handles in `_save_history`/`_save_config`
+were fixed in the same pass.
+
+---
+
+*Original entry, retained:*
 
 **Adjoint is inconsistent when the lam2 clamp binds.** Measured and downgraded:
 with the cosine schedule the clamp does not fire at all (0 events against 2 for
@@ -115,16 +170,63 @@ Recorded here because the next experiments were designed around it.
   conservation, exact boundary data, and the lowest I3 drift in the sweep, at
   1/7.9 the training cost. `hard_bc+proj` is the best configuration measured on
   every axis.
-* A controlled sweep puts numbers on the operator: `L2_after ~ 0.905 *
-  L2_before + 7.6e-06`, holding from a 1e-04 perturbation to a 1e+00 one. There
-  is no upper limit — it still cuts a 100% error by 40%. The limit is at the
-  bottom: break-even is at L2 ~ 8e-05, and the runs sit 20x above that.
+* ~~A controlled sweep puts numbers on the operator: `L2_after ~ 0.905 *
+  L2_before + 7.6e-06` ... break-even is at L2 ~ 8e-05.~~ **Superseded, see
+  `THEORY.md` §5b.** The additive term was not a property of the operator. It
+  was caused by the elliptic solve being given Dirichlet data frozen at `t = 0`
+  while the soliton's tails move, together with `C1` targets that ignore
+  boundary flux. With consistent data the projection is idempotent on the exact
+  solution to `4.15e-17`, the additive term vanishes, and the ratio is `0.9095`
+  from `L2 = 1e-08` to `1e-01` — constant to four digits over eight orders of
+  magnitude. **There is no break-even.**
 * Not established: any accuracy benefit over time. `hard_bc` leads at every one
   of 20 time levels with a roughly constant ratio, so there is no crossover on
   this horizon. 96–99.9% of the error is shape, which neither a translation nor
   an amplitude rescale explains, so conserving two scalars cannot reach it.
 * RLW1 is probably too easy to discriminate: a single wave of amplitude 0.3 is
   nearly trivial for a PINN. RLW2 was chosen next for that reason.
+
+## What the theory changed (2026-08-02)
+
+Full statements and proofs in `THEORY.md`; numbers regenerated by
+`tools/verify_theory.py`. The results that alter how experiments should be run:
+
+* **There is a computable ceiling on what conservation can achieve.** Only the
+  component of the error inside `span{grad I1, grad I2}` — a 2-dimensional
+  subspace — is reachable. For `hard_bc` on RLW1 that is 6.72% of the error, so
+  the maximum possible improvement is 3.42%. The projection realises 3.402%.
+  Chasing a larger forward-accuracy gain on this problem is chasing something
+  that provably does not exist.
+
+* **Two data defects must be fixed before any further projection runs.** The
+  elliptic solve is given `ga`, `gb` frozen at `t = 0` (mismatch 6.9e-06 and
+  1.3e-05 at `t = T` on RLW1) and `C1` targets that ignore boundary flux
+  (4.8e-06 relative). Both are needed; neither alone suffices. `ga_fn`/`gb_fn`
+  are already read from config (`train.py:84`), so the boundary half is
+  **config-only and does not move `CODE_VERSION`**. Time-dependent `C1(t)`,
+  `C2(t)` require a numerical change — the same one already queued for RLW3,
+  now known to matter on every problem rather than only the bore.
+
+* **Baseline accuracy does not affect the conclusions.** The improvement ratio
+  is constant over eight orders of magnitude of baseline error, so a short
+  training budget does not bias the comparison. One long run is still worth
+  doing to answer the objection directly, but a full sweep at a larger budget
+  is not needed.
+
+* **Test problems should be selected by derivative share**, `1 - C2_poly_ref /
+  C2_ref`: RLW1 is 1.8%, RLW2 is 10.8%. RLW1 barely exercises the feature that
+  distinguishes this method. RLW2 should be the centrepiece; RLW1 stays as a
+  baseline with its share reported openly.
+
+* **RLW2's failure is less costly than it looked.** The collision is the only
+  configuration tested in which `mu` is identifiable from conservation at all
+  (`int u_x^2` varies by 0.71 there against 1.7e-09 for a single soliton), so
+  it is the right problem for the inverse direction regardless of the forward
+  training failure.
+
+* **`I3` should not get a projection.** Cubic, so the solve becomes nonlinear;
+  it contains no derivative, so enforcing it is not novel; and it would move
+  the ceiling only from 3.42% to about 5%. Use it for `eps` recovery instead.
 
 ## Known gaps, carried deliberately
 
