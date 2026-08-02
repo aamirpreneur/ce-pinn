@@ -336,6 +336,134 @@ print(f'{sum(p.numel() for p in model.parameters()):,} parameters, '
     exact='exact_at_T',
 )
 
+EXPERIMENTS['RLW1T_tall_soliton'] = dict(
+    title="RLW-1T: Tall Solitary Wave",
+    blurb=("Same equation and same operator as RLW-1, with one parameter\n"
+           "changed: c = 5.33/3 instead of 0.1, so the wave amplitude is\n"
+           "5.33 rather than 0.3.\n\n"
+           "The reason is the derivative share of the invariant. For an RLW\n"
+           "soliton the fraction of I2 = int(u^2 + mu*u_x^2) contributed by\n"
+           "the derivative term works out to eps*c/(5 + 6*eps*c), which is\n"
+           "1.8% at c=0.1 and 11.3% here. RLW-1 therefore barely exercises\n"
+           "the one feature that distinguishes this method from the affine\n"
+           "projections of prior work, and this run does. Note the ceiling\n"
+           "of 1/6 = 16.7% as c -> infinity: no RLW problem can do better,\n"
+           "which is why Camassa-Holm (50%) is also in the study.\n\n"
+           "The solution is analytic, so no reference solver is needed.\n"
+           "eps=1, mu=1, c=5.33/3, x0=15, domain [0,100], T=20."),
+    config="""TAG      = 'rlw1t'
+EQUATION = 'rlw'
+VARIANT  = 'hard_bc'   # vanilla | hard_bc | ce_poly | ce_helm | ce_full
+SMOKE    = False
+
+EPS, MU  = 1.0, 1.0
+C_AMP    = 5.33 / 3.0  # wave amplitude is 3*c = 5.33, as RLW2's tall wave
+X0       = 15.0
+XA, XB   = 0.0, 100.0
+T_FINAL  = 20.0
+
+HIDDEN_LAYERS, HIDDEN_WIDTH = 8, 100
+N_GRID   = 201 if SMOKE else 601     # ~15 points across the wave at 601
+N_T      = 4   if SMOKE else 10
+ADAM_ITER  = 200 if SMOKE else 6000
+LBFGS_ITER = 20  if SMOKE else 500
+LAM_I3   = 1e-4 if VARIANT == 'ce_full' else 0.0
+LOG_EVERY = 20 if SMOKE else 200""",
+    build="""def ic_np(x):
+    return rlw_soliton(x, 0.0, eps=EPS, mu=MU, c=C_AMP, x0=X0)
+
+def ic_torch(x):
+    return rlw_soliton_torch(x, torch.zeros_like(x), eps=EPS, mu=MU,
+                             c=C_AMP, x0=X0)
+
+def exact_at_T(x):
+    return rlw_soliton(x, T_FINAL, eps=EPS, mu=MU, c=C_AMP, x0=X0)
+
+# Exact boundary data and exact targets, both time-dependent.
+#
+# The wave starts 15 units from the left edge, where its tail is 1.3e-04, and
+# ends 70 units away, where it is ~0. Boundary values frozen at t=0 would
+# therefore be wrong by ~1e-04 by the end of the run, and the invariants drift
+# by the corresponding flux. Projecting onto stale data makes the exact
+# solution not a fixed point of the projection, which shows up as an additive
+# error floor rather than one that shrinks with the network error (THEORY.md
+# 5b). All four are analytic here, so there is no reason to approximate them.
+#
+# C1_fn and C2_fn must use the *same* quadrature and difference matrix as the
+# trainer, or they would return a target the discrete invariant cannot attain.
+_dx   = (XB - XA) / (N_GRID - 1)
+_xg   = torch.linspace(XA, XB, N_GRID, dtype=torch.float64)
+_q    = trapezoid_weights(N_GRID, _dx)
+_D1   = central_d1_matrix(N_GRID, _dx)
+
+def _exact_on_grid(t):
+    return rlw_soliton_torch(_xg, torch.full_like(_xg, float(t)),
+                             eps=EPS, mu=MU, c=C_AMP, x0=X0)
+
+# ga_fn/gb_fn are called two different ways and must serve both: HardBC1D
+# passes the whole (N,) vector of times and needs a tensor back of the same
+# shape, differentiable in t because the ansatz is differentiated through it;
+# GridTrainer._ga passes one scalar and takes float() of the result. Evaluating
+# elementwise satisfies both, and works for a 0-d tensor too.
+def _edge(t, xe):
+    tt = torch.as_tensor(t, dtype=torch.float64)
+    return rlw_soliton_torch(torch.full_like(tt, xe), tt,
+                             eps=EPS, mu=MU, c=C_AMP, x0=X0)
+
+def ga_fn(t):  return _edge(t, XA)
+def gb_fn(t):  return _edge(t, XB)
+
+def C1_fn(t):
+    return float(torch.dot(_q, _exact_on_grid(t)))
+
+def C2_fn(t):
+    u = _exact_on_grid(t)
+    ux = torch.matmul(u, _D1.T)
+    return float(torch.dot(_q, u * u + MU * ux * ux))
+
+def C3_fn(t):
+    u = _exact_on_grid(t)
+    return float(torch.dot(_q, EPS * u ** 3 + 3.0 * u * u))
+
+def C2_poly_fn(t):
+    u = _exact_on_grid(t)
+    return float(torch.dot(_q, u * u))
+
+C2_POLY = C2_poly_fn(0.0)
+
+torch.manual_seed(SEED)
+mlp = MLP(d_in=2, d_out=1, hidden_layers=HIDDEN_LAYERS,
+          hidden_width=HIDDEN_WIDTH)
+
+if VARIANT == 'vanilla':
+    model, projection, soft_ibc = VanillaNet(mlp), None, True
+elif VARIANT == 'hard_bc':
+    model, projection, soft_ibc = HardBC1D(mlp, ic_torch, XA, XB, T=T_FINAL,
+                                           ga_fn=ga_fn, gb_fn=gb_fn), None, False
+elif VARIANT == 'ce_poly':
+    model, projection, soft_ibc = HardBC1D(mlp, ic_torch, XA, XB, T=T_FINAL,
+                                           ga_fn=ga_fn, gb_fn=gb_fn), 'polynomial', False
+elif VARIANT in ('ce_helm', 'ce_full'):
+    model, projection, soft_ibc = HardBC1D(mlp, ic_torch, XA, XB, T=T_FINAL,
+                                           ga_fn=ga_fn, gb_fn=gb_fn), 'helmholtz', False
+else:
+    raise ValueError(VARIANT)
+
+config = dict(equation=EQUATION, eps=EPS, mu=MU, xa=XA, xb=XB, T=T_FINAL,
+              ic_fn=ic_np, n_grid=N_GRID, n_t=N_T, projection=projection,
+              soft_ibc=soft_ibc, lam_ibc=10.0, C2_poly_ref=C2_POLY,
+              diag_every=LOG_EVERY,
+              ga_fn=ga_fn, gb_fn=gb_fn,
+              C1_fn=C1_fn, C2_fn=C2_fn, C3_fn=C3_fn, C2_poly_fn=C2_poly_fn)
+
+_share = 1.0 - C2_poly_fn(0.0) / C2_fn(0.0)
+print(f'{sum(p.numel() for p in model.parameters()):,} parameters, '
+      f'projection={projection}')
+print(f'derivative share of I2: {100*_share:.2f}%  '
+      f'(RLW1 is 1.8%; analytic prediction {100*EPS*C_AMP/(5+6*EPS*C_AMP):.2f}%)')""",
+    exact='exact_at_T',
+)
+
 EXPERIMENTS['KdV1_single_soliton'] = dict(
     title="KdV-1: Single Soliton (control)",
     blurb=("A control, not a headline. KdV's I2 = int(u^2) dx is polynomial,\n"

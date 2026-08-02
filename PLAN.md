@@ -70,7 +70,7 @@ predictor of the ceiling (see the correction above).
 | problem | share | measured ceiling | new code | risk |
 |---|---|---|---|---|
 | RLW1, `c = 0.1` | 1.8% | 3.42% | none — already runs | none |
-| RLW tall soliton, `c = 1.777` | ~11% | not yet measured | config only; exact solution known | low |
+| RLW tall soliton, `c = 1.777` | **11.30%** | to be measured | **done** — `RLW1T_tall_soliton.ipynb` | none |
 | Camassa–Holm, smooth wave | ~50% | 6.89% (peakon) | new PDE residual | medium |
 | *Rosenau* (optional) | H² invariant | — | new residual **and** 4th-order solve | higher |
 
@@ -110,6 +110,29 @@ be enforcing a target that is 1% wrong — the same failure mode as the coarse-g
 **Consequence: a reference for the smooth `kappa > 0` solitary wave is now a
 blocking item.** It has no simple closed form, so a source is required before
 Phase 1 can proceed. This is the one literature dependency in the plan.
+
+### 1.1b — Tall soliton. **DONE, 2026-08-02.**
+
+`RLW1T_tall_soliton.ipynb`, `c = 5.33/3` so the amplitude is 5.33, on
+`[0,100]` with `T = 20`. Analytic solution, so no reference solver. Verified at
+the real `N_GRID = 601`:
+
+| check | result |
+|---|---|
+| derivative share | **11.30%** measured against 11.35% predicted by `eps*c/(5+6*eps*c)` |
+| resolution | 15 points across the wave; travels 55.5 of 100 units |
+| Theorem 7, exact time-dependent data | `3.43e-16` |
+| Theorem 7, frozen at `t=0` | `4.20e-05` |
+
+The last two rows are the point. Frozen boundary data would have carried a
+floor of `4.20e-05` here — an order of magnitude worse than RLW1's `5.6e-06`,
+because this wave starts 15 units from the left edge and ends 70 away, so its
+tail there falls from `1.31e-04` to `6.7e-24`. The Phase 0 fix cuts that floor
+by a factor of 122,000. Had this problem been run before Phase 0, the floor
+would have sat only ~20x below the expected solution error.
+
+This is the first experiment to use `ga_fn`, `gb_fn`, `C1_fn`, `C2_fn`,
+`C3_fn` and `C2_poly_fn` together.
 
 ### 1.2 — Reference solutions
 
