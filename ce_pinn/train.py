@@ -55,7 +55,7 @@ class GridTrainer:
 
         eq = config['equation']
         self.ops = GridOps(config['xa'], config['xb'], config['n_grid'],
-                           device=device, need_d3=(eq == 'kdv'))
+                           device=device, need_d3=(eq in ('kdv', 'ch')))
         self.x = self.ops.x
         self.dx = self.ops.dx
         self.q = self.ops.q
@@ -116,6 +116,14 @@ class GridTrainer:
             # Verified numerically against a pseudospectral solve at eps=1.5,
             # where int(u^3+3u^2) drifts by 5e-4 over t=5 and this does not.
             I3 = torch.dot(self.q, cfg['eps'] * u ** 3 + 3.0 * u * u)
+        elif cfg['equation'] == 'ch':
+            # Camassa-Holm conserves E1 = int(u^2 + u_x^2), which is the RLW
+            # form at mu = 1, so the same Helmholtz projection applies with no
+            # change. Its second invariant E2 = int(u^3 + u u_x^2) is cubic
+            # *and* derivative-dependent; it is reported but never projected
+            # onto, since that would make the solve nonlinear.
+            I2 = torch.dot(self.q, u * u + ux * ux)
+            I3 = torch.dot(self.q, u ** 3 + u * ux * ux)
         else:
             I2 = torch.dot(self.q, u * u)
             I3 = torch.dot(self.q, u ** 3 - 0.5 * ux * ux)
@@ -183,8 +191,21 @@ class GridTrainer:
             # u_xt is taken as zero, valid for a steady boundary state
             fa = ga + 0.5 * cfg['eps'] * ga * ga
             fb = gb + 0.5 * cfg['eps'] * gb * gb
-        else:
+        elif cfg['equation'] == 'kdv':
             fa, fb = 3.0 * ga * ga, 3.0 * gb * gb
+        else:
+            # No flux expression derived for this equation. Say so rather than
+            # silently reusing another equation's formula and reporting a
+            # reassuring number that means nothing.
+            print(f"Boundary flux not estimated for equation "
+                  f"{cfg['equation']!r}; "
+                  + ("time-dependent targets are supplied, which is the fix "
+                     "this check exists to prompt."
+                     if self.time_dependent_targets else
+                     "supply C1_fn/C2_fn if the invariants are not conserved "
+                     "on this domain."))
+            self.flux_dC1dt = float('nan')
+            return
         dC1dt = -(fb - fa)
         rel = abs(dC1dt) * cfg['T'] / (abs(self.C1_ref) + 1e-30)
         self.flux_dC1dt = dC1dt
@@ -275,6 +296,11 @@ class GridTrainer:
             return u_t + ux + cfg['eps'] * u * ux - cfg['mu'] * uxxt
         if cfg['equation'] == 'kdv':
             return u_t + 6.0 * u * ux + self.ops.d3(u)
+        if cfg['equation'] == 'ch':
+            # u_t - u_xxt + 2*kappa*u_x + 3*u*u_x = 2*u_x*u_xx + u*u_xxx
+            uxx = self.ops.d2(u)
+            return (u_t - self.ops.d2(u_t) + 2.0 * cfg['kappa'] * ux
+                    + 3.0 * u * ux - 2.0 * ux * uxx - u * self.ops.d3(u))
         raise ValueError(cfg['equation'])
 
     # ------------------------------------------------------------------

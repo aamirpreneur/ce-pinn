@@ -100,6 +100,108 @@ def rlw_soliton_torch(x, t, eps=1.0, mu=1.0, c=0.1, x0=0.0):
     return 3.0 * c / torch.cosh(arg)**2
 
 
+def _ch_profile_table(c, kappa, h=2e-3, xi_max=60.0):
+    """(xi, phi, dphi) on a uniform xi grid, for the CH solitary wave.
+
+    Travelling waves of Camassa-Holm satisfy, after two integrations with
+    phi -> 0 at infinity,
+
+        (phi')^2 = phi^2 (a - phi) / (c - phi),      a = c - 2*kappa,
+
+    (Lenells 2005) whose peak amplitude is a and which reduces at kappa = 0 to
+    (phi')^2 = phi^2, i.e. the peakon phi = c*exp(-|xi|). For kappa > 0 the
+    profile is smooth but implicit -- there is no closed form -- so it is
+    generated numerically once and interpolated.
+
+    Integrating that equation directly is badly conditioned: at the crest the
+    right-hand side has an infinite derivative in phi, and Runge-Kutta loses
+    its order there. Substituting phi = a - v^2 gives
+
+        dv/dxi = (a - v^2) / (2 sqrt(c - a + v^2)),      v(0) = 0,
+
+    which is smooth on the whole branch. Same solution, no singularity: the
+    substitution improves the profile from 4e-06 to 2e-11 under step halving.
+    """
+    if not (0.0 < kappa < 0.5 * c):
+        raise ValueError("need 0 < kappa < c/2 for a smooth solitary wave")
+    a = c - 2.0 * kappa
+
+    def dv(v):
+        return (a - v * v) / (2.0 * np.sqrt(c - a + v * v))
+
+    n = int(np.ceil(xi_max / h)) + 1
+    xi = np.arange(n) * h
+    vv = np.empty(n)
+    v = 0.0
+    vv[0] = 0.0
+    for i in range(1, n):
+        k1 = dv(v)
+        k2 = dv(v + 0.5 * h * k1)
+        k3 = dv(v + 0.5 * h * k2)
+        k4 = dv(v + h * k3)
+        v = min(v + (h / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4),
+                np.sqrt(a) - 1e-300)
+        vv[i] = v
+    phi = a - vv * vv
+    return xi, phi, -2.0 * vv * dv(vv)
+
+
+_CH_CACHE = {}
+
+
+def ch_solitary(x, t, c=1.0, kappa=0.1, x0=0.0):
+    """Smooth CH solitary wave, amplitude a = c - 2*kappa, speed c.
+
+    Cubic Hermite between table nodes, using the ODE for the exact node
+    derivatives rather than differenced ones, so the interpolation is O(h^4)
+    with an analytically correct slope.
+    """
+    key = (float(c), float(kappa))
+    if key not in _CH_CACHE:
+        _CH_CACHE[key] = _ch_profile_table(c, kappa)
+    xi, phi, dphi = _CH_CACHE[key]
+    h = xi[1] - xi[0]
+    s = np.abs(np.asarray(x, dtype=float) - c * float(t) - x0)
+    s = np.minimum(s, xi[-1] - 1e-12)
+    j = np.clip((s / h).astype(int), 0, len(xi) - 2)
+    w = (s - xi[j]) / h
+    w2, w3 = w * w, w * w * w
+    return ((2 * w3 - 3 * w2 + 1) * phi[j] + (w3 - 2 * w2 + w) * dphi[j] * h
+            + (-2 * w3 + 3 * w2) * phi[j + 1] + (w3 - w2) * dphi[j + 1] * h)
+
+
+_CH_CACHE_T = {}
+
+
+def ch_solitary_torch(x, t, c=1.0, kappa=0.1, x0=0.0):
+    """Differentiable in both x and t.
+
+    The same cubic Hermite as `ch_solitary`, evaluated with torch ops so that
+    autograd flows through. This matters: `HardBC1D` builds its ansatz from the
+    boundary values and differentiates it with respect to t, so a version that
+    round-tripped through numpy would silently return zero for d(g_a)/dt and
+    give the wrong tangent at the boundary. Only the node index is
+    non-differentiable, which is the usual situation for interpolation.
+    """
+    if not torch.is_tensor(t):
+        t = torch.as_tensor(t, dtype=x.dtype, device=x.device)
+    key = (float(c), float(kappa), str(x.device), x.dtype)
+    if key not in _CH_CACHE_T:
+        xi, phi, dphi = _ch_profile_table(c, kappa)
+        _CH_CACHE_T[key] = tuple(
+            torch.as_tensor(v, dtype=x.dtype, device=x.device)
+            for v in (xi, phi, dphi))
+    xi, phi, dphi = _CH_CACHE_T[key]
+    h = float(xi[1] - xi[0])
+    s = torch.abs(x - c * t - x0)
+    s = torch.clamp(s, max=float(xi[-1]) - 1e-12)
+    j = torch.clamp((s / h).long(), 0, xi.numel() - 2)
+    w = (s - xi[j]) / h
+    w2, w3 = w * w, w * w * w
+    return ((2 * w3 - 3 * w2 + 1) * phi[j] + (w3 - 2 * w2 + w) * dphi[j] * h
+            + (-2 * w3 + 3 * w2) * phi[j + 1] + (w3 - w2) * dphi[j + 1] * h)
+
+
 def rlw_two_soliton_ic(x, eps=1.0, mu=1.0, c1=5.33/3, c2=1.69/3, x1=15.0, x2=35.0):
     """Superposition IC for two well-separated RLW solitons."""
     u1 = rlw_soliton(x, 0.0, eps, mu, c1, x1)

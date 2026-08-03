@@ -70,6 +70,20 @@ listed here changed no numbers.
 | 2026-08-02 | Theory (`THEORY.md`), verification (`tools/verify_theory.py`), `check_rlw2_best.py` | no | nothing — reads stored checkpoints, proves statements about the existing operator |
 | 2026-08-02 | **exp-v4, Phase 0.** Time-dependent targets `C1_fn`/`C2_fn`/`C3_fn`; clamped-state solve made well-posed and its adjoint dropped to rank 1; `float()` detached; file handles closed | yes | **everything.** `CODE_VERSION` `e299b122b9be` -> `0c25c545396d`. See the reach note below |
 
+| 2026-08-02 | **exp-v5.** Camassa-Holm support: `ch_solitary`/`ch_solitary_torch` in `equations.py`, `ch` branches in `_residual` and `_invariants`, `need_d3` for `ch`, boundary-flux check no longer falls through to the KdV formula for unknown equations | yes | **nothing beyond exp-v4** — no run was ever produced under exp-v4, so `exp-v5` is the first version any experiment will use. `CODE_VERSION` `0c25c545396d` -> `1275f618af65` |
+
+### Reach of the exp-v5 changes
+
+Additive: new `ch` branches and two new functions. The `rlw` and `kdv` code
+paths are untouched, so the exp-v4 reach note below still describes everything
+that changed relative to the completed RLW1 sweep. The one non-additive edit is
+the boundary-flux check, which previously applied the KdV flux expression to
+*any* equation that was not `rlw` — now it says so instead of printing a
+reassuring number derived from the wrong conservation law.
+
+`exp-v4` was tagged but produced no runs, so nothing is lost by superseding it.
+**Every experiment should run under `exp-v5` or later.**
+
 ### Reach of the exp-v4 changes
 
 `CODE_VERSION` moves, so nothing before it is formally comparable. What

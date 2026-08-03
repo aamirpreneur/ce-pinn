@@ -71,7 +71,7 @@ predictor of the ceiling (see the correction above).
 |---|---|---|---|---|
 | RLW1, `c = 0.1` | 1.8% | 3.42% | none — already runs | none |
 | RLW tall soliton, `c = 1.777` | **11.30%** | to be measured | **done** — `RLW1T_tall_soliton.ipynb` | none |
-| Camassa–Holm, smooth wave | ~50% | 6.89% (peakon) | new PDE residual | medium |
+| Camassa–Holm, `kappa = 0.1` | **27.97%** | to be measured | **done** — `CH1_solitary_wave.ipynb` | none |
 | *Rosenau* (optional) | H² invariant | — | new residual **and** 4th-order solve | higher |
 
 ### 1.0 — Camassa–Holm compatibility. **DONE, 2026-08-02. Passed.**
@@ -133,6 +133,39 @@ would have sat only ~20x below the expected solution error.
 
 This is the first experiment to use `ga_fn`, `gb_fn`, `C1_fn`, `C2_fn`,
 `C3_fn` and `C2_poly_fn` together.
+
+### 1.1c — Camassa–Holm. **DONE, 2026-08-02.**
+
+`CH1_solitary_wave.ipynb`, `c = 1`, `kappa = 0.1` (amplitude 0.8), on `[0,40]`
+with `T = 20`, `N = 601`. Verified at the real grid:
+
+| check | result |
+|---|---|
+| derivative share | **27.97%** measured against 28.04% exact |
+| CH residual on the exact wave | rms `8.5e-05` against `|u_t|` rms `1.1e-01`; converges to `6.0e-07` at N=2401, observed order 3.5–5 |
+| Theorem 7, exact time-dependent data | `1.37e-16` |
+| Theorem 7, frozen at `t=0` | `4.08e-05` |
+| resolution | 35 points across the wave |
+
+The residual check is the one that matters: a sign error in the CH equation
+would still have produced a plausible training curve while making every
+downstream number meaningless. It converges cleanly to zero, so the
+implementation is right.
+
+**Grid: `N = 601`, not the 2401 first estimated.** The earlier figure came from
+comparing the grid-computed `C2` against its *continuum* value. That is the
+wrong criterion — the trainer computes `C1_fn`/`C2_fn` with the same quadrature
+and `D1c` it uses for the constraint, so the sampled exact solution satisfies
+the discrete constraint by construction at any resolution. Confirmed: Theorem 7
+holds at `2.7e-15` from N=401 to N=2401, *including* with the crest placed
+halfway between grid points. The binding constraint is resolving the wave for
+the PDE residual, which is far cheaper. Same argument applies to the
+coarse-grid "confound" recorded earlier for RLW1 — it was measured the same
+way and overstated.
+
+**Peakons stay ruled out**, now with the convergence rate measured: order
+0.94/0.97/0.99 against 1.93/1.98/2.00 for the smooth wave, and 35x the error at
+equal resolution.
 
 ### 1.2 — Reference solutions
 

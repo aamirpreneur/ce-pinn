@@ -464,6 +464,138 @@ print(f'derivative share of I2: {100*_share:.2f}%  '
     exact='exact_at_T',
 )
 
+EXPERIMENTS['CH1_solitary_wave'] = dict(
+    title="CH-1: Camassa-Holm Solitary Wave",
+    blurb=("The strongest test of the method, because Camassa-Holm's\n"
+           "conserved quantity IS the H1 norm:\n\n"
+           "    E1(u) = int (u^2 + u_x^2) dx\n\n"
+           "which is the RLW invariant at mu = 1, so the same Helmholtz\n"
+           "projection applies with no change of code. The derivative term\n"
+           "carries 28.04% of E1 here, against 11.3% for the tall RLW\n"
+           "soliton and 1.8% for RLW-1 -- and no RLW problem can exceed\n"
+           "16.7%, so this is a regime the RLW family cannot reach.\n\n"
+           "kappa = 0.1 sets the trade-off. At kappa = 0 the share is\n"
+           "exactly 50% but the wave is a peakon, whose corner makes\n"
+           "int u_x^2 converge at first order -- 1.2% wrong even at 4801\n"
+           "points, so peakons are unusable with finite differences. At\n"
+           "kappa = 0.1 the wave is smooth, convergence is a clean second\n"
+           "order, and 28% is still 2.5x the best RLW case.\n\n"
+           "The profile is implicit (Lenells 2005): no closed form, so it is\n"
+           "integrated once and interpolated. E2 = int(u^3 + u u_x^2) is also\n"
+           "derivative-dependent but cubic, so it is reported, never\n"
+           "projected onto."),
+    config="""TAG      = 'ch1'
+EQUATION = 'ch'
+VARIANT  = 'hard_bc'   # vanilla | hard_bc | ce_poly | ce_helm | ce_full
+SMOKE    = False
+
+C_WAVE   = 1.0         # wave speed; amplitude is C_WAVE - 2*KAPPA
+KAPPA    = 0.1
+MU       = 1.0         # CH's E1 is the RLW invariant at mu = 1
+EPS      = 1.0         # unused by the CH residual, kept for the config schema
+X0       = 10.0
+XA, XB   = 0.0, 40.0
+T_FINAL  = 20.0        # wave travels at speed C_WAVE: 10 -> 30, 10 clear each side
+
+HIDDEN_LAYERS, HIDDEN_WIDTH = 8, 100
+N_GRID   = 201 if SMOKE else 601     # ~35 points across the wave
+N_T      = 4   if SMOKE else 10
+ADAM_ITER  = 200 if SMOKE else 6000
+LBFGS_ITER = 20  if SMOKE else 500
+LAM_I3   = 0.0         # E2 is cubic; no soft penalty on it
+LOG_EVERY = 20 if SMOKE else 200""",
+    build="""def ic_np(x):
+    return ch_solitary(x, 0.0, c=C_WAVE, kappa=KAPPA, x0=X0)
+
+def ic_torch(x):
+    return ch_solitary_torch(x, torch.zeros_like(x), c=C_WAVE, kappa=KAPPA, x0=X0)
+
+def exact_at_T(x):
+    return ch_solitary(x, T_FINAL, c=C_WAVE, kappa=KAPPA, x0=X0)
+
+# Exact, time-dependent boundary data and targets. The wave is 10 units from
+# each edge, where its tail is ~1.8e-06 falling to ~3e-14 as it crosses, so the
+# boundary values move over four orders of magnitude during the run. Freezing
+# them at t=0 would make the exact solution not a fixed point of the projection
+# and leave an additive error floor (THEORY.md 5b).
+#
+# The targets are computed with the same quadrature and the same D1c the
+# trainer uses, which is what makes the discretely-sampled exact solution
+# satisfy the discrete constraint exactly -- verified at 2.7e-15 even with the
+# crest halfway between grid points.
+_dx   = (XB - XA) / (N_GRID - 1)
+_xg   = torch.linspace(XA, XB, N_GRID, dtype=torch.float64)
+_q    = trapezoid_weights(N_GRID, _dx)
+_D1   = central_d1_matrix(N_GRID, _dx)
+
+def _exact_on_grid(t):
+    return ch_solitary_torch(_xg, torch.full_like(_xg, float(t)),
+                             c=C_WAVE, kappa=KAPPA, x0=X0)
+
+# Evaluated with ch_solitary_torch so autograd flows through: HardBC1D
+# differentiates its ansatz with respect to t, and a numpy round-trip would
+# silently return zero for d(g_a)/dt.
+def _edge(t, xe):
+    tt = torch.as_tensor(t, dtype=torch.float64)
+    return ch_solitary_torch(torch.full_like(tt, xe), tt,
+                             c=C_WAVE, kappa=KAPPA, x0=X0)
+
+def ga_fn(t):  return _edge(t, XA)
+def gb_fn(t):  return _edge(t, XB)
+
+def C1_fn(t):
+    return float(torch.dot(_q, _exact_on_grid(t)))
+
+def C2_fn(t):
+    u = _exact_on_grid(t)
+    ux = torch.matmul(u, _D1.T)
+    return float(torch.dot(_q, u * u + ux * ux))
+
+def C3_fn(t):
+    u = _exact_on_grid(t)
+    ux = torch.matmul(u, _D1.T)
+    return float(torch.dot(_q, u ** 3 + u * ux * ux))
+
+def C2_poly_fn(t):
+    u = _exact_on_grid(t)
+    return float(torch.dot(_q, u * u))
+
+C2_POLY = C2_poly_fn(0.0)
+
+torch.manual_seed(SEED)
+mlp = MLP(d_in=2, d_out=1, hidden_layers=HIDDEN_LAYERS,
+          hidden_width=HIDDEN_WIDTH)
+
+if VARIANT == 'vanilla':
+    model, projection, soft_ibc = VanillaNet(mlp), None, True
+elif VARIANT == 'hard_bc':
+    model, projection, soft_ibc = HardBC1D(mlp, ic_torch, XA, XB, T=T_FINAL,
+                                           ga_fn=ga_fn, gb_fn=gb_fn), None, False
+elif VARIANT == 'ce_poly':
+    model, projection, soft_ibc = HardBC1D(mlp, ic_torch, XA, XB, T=T_FINAL,
+                                           ga_fn=ga_fn, gb_fn=gb_fn), 'polynomial', False
+elif VARIANT in ('ce_helm', 'ce_full'):
+    model, projection, soft_ibc = HardBC1D(mlp, ic_torch, XA, XB, T=T_FINAL,
+                                           ga_fn=ga_fn, gb_fn=gb_fn), 'helmholtz', False
+else:
+    raise ValueError(VARIANT)
+
+config = dict(equation=EQUATION, eps=EPS, mu=MU, kappa=KAPPA,
+              xa=XA, xb=XB, T=T_FINAL,
+              ic_fn=ic_np, n_grid=N_GRID, n_t=N_T, projection=projection,
+              soft_ibc=soft_ibc, lam_ibc=10.0, C2_poly_ref=C2_POLY,
+              diag_every=LOG_EVERY,
+              ga_fn=ga_fn, gb_fn=gb_fn,
+              C1_fn=C1_fn, C2_fn=C2_fn, C3_fn=C3_fn, C2_poly_fn=C2_poly_fn)
+
+_share = 1.0 - C2_poly_fn(0.0) / C2_fn(0.0)
+print(f'{sum(p.numel() for p in model.parameters()):,} parameters, '
+      f'projection={projection}')
+print(f'amplitude {C_WAVE - 2*KAPPA:.3f}, derivative share of E1: '
+      f'{100*_share:.2f}%  (RLW1 1.8%, RLW1T 11.3%, RLW ceiling 16.7%)')""",
+    exact='exact_at_T',
+)
+
 EXPERIMENTS['KdV1_single_soliton'] = dict(
     title="KdV-1: Single Soliton (control)",
     blurb=("A control, not a headline. KdV's I2 = int(u^2) dx is polynomial,\n"

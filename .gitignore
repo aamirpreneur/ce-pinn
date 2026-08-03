@@ -27,3 +27,4 @@ tests/_phase0/
 # there, and ignoring it made `git add -A results` a silent no-op on Kaggle:
 # the cell reported success while committing nothing.
 tests/_rlw1t/
+tests/_ch1/
