@@ -1,0 +1,26 @@
+{
+  "title": "CE-PINN: Conservation-Embedded Physics-Informed Neural Networks",
+  "description": "A differentiable projection enforcing a derivative-dependent integral invariant, ∫(u²+μu_x²)dx, exactly in a physics-informed neural network. Reduces to a Helmholtz problem with Dirichlet data, solved by Newton iteration on the Lagrange multipliers. Includes the library (ce_pinn/), the experiment notebooks, the analysis and verification scripts (tools/), and the archived run outputs (results/) behind the accompanying paper.",
+  "creators": [
+    {
+      "name": "Shehzad, Aamir",
+      "affiliation": "Ghulam Ishaq Khan Institute of Engineering Sciences and Technology",
+      "orcid": "0009-0003-3211-5275"
+    },
+    {
+      "name": "Haq, Sirajul",
+      "affiliation": "Ghulam Ishaq Khan Institute of Engineering Sciences and Technology"
+    }
+  ],
+  "license": "MIT",
+  "upload_type": "software",
+  "access_right": "open",
+  "keywords": [
+    "physics-informed neural networks",
+    "conservation laws",
+    "projection methods",
+    "regularized long-wave equation",
+    "Camassa-Holm equation",
+    "structure-preserving methods"
+  ]
+}

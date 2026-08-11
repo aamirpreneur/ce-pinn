@@ -1,0 +1,31 @@
+{
+  "equation": "rlw",
+  "eps": 1.0,
+  "mu": 16.0,
+  "xa": -55.0,
+  "xb": 90.0,
+  "T": 12.0,
+  "n_grid": 401,
+  "n_t": 10,
+  "projection": "polynomial",
+  "soft_ibc": false,
+  "lam_ibc": 10.0,
+  "C2_poly_ref": 378.8279706152564,
+  "diag_every": 200,
+  "newton_max_iter": 16,
+  "C1_ref": 106.61021413857281,
+  "C2_ref": 427.24643821292597,
+  "C3_ref": 2751.806379906578,
+  "ga0": 0.0003565094608424819,
+  "gb0": 3.253616490775909e-07,
+  "device": "cuda",
+  "time_dependent_targets": true,
+  "supplied_fns": [
+    "C1_fn",
+    "C2_fn",
+    "C2_poly_fn",
+    "C3_fn",
+    "ga_fn",
+    "gb_fn"
+  ]
+}

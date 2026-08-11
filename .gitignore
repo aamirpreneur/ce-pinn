@@ -1,0 +1,21 @@
+__pycache__/
+*.pyc
+
+# scratch dirs written by ad hoc diagnostics and by the post-hoc analysis
+# tools in tools/. All follow the leading-underscore convention, so a new
+# one only needs the convention, not a new line here. This single pattern
+# replaces ~30 individually listed names, three of which (_bclamp,
+# _maxiter, _speed) were committed before ever being added below and so
+# stayed tracked regardless -- `git rm --cached` was needed for those.
+tests/_*/
+
+# results/ is deliberately NOT ignored. The push cell archives run outputs
+# there, and ignoring it made `git add -A results` a silent no-op on Kaggle:
+# the cell reported success while committing nothing.
+
+# The manuscript source and the internal working docs it grew from are not
+# part of the code-availability repository. Both stay on disk locally;
+# `git rm --cached` removed them from tracking without deleting either.
+paper/
+docs/
+_candidate_figures/

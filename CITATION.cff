@@ -1,0 +1,29 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the paper. If you cite the
+  software specifically (a particular version, or the code rather than the
+  results), cite this record."
+title: "CE-PINN: Conservation-Embedded Physics-Informed Neural Networks"
+type: software
+authors:
+  - family-names: Shehzad
+    given-names: Aamir
+    orcid: "https://orcid.org/0009-0003-3211-5275"
+    affiliation: "Ghulam Ishaq Khan Institute of Engineering Sciences and Technology"
+  - family-names: Haq
+    given-names: Sirajul
+    affiliation: "Ghulam Ishaq Khan Institute of Engineering Sciences and Technology"
+license: MIT
+repository-code: "https://github.com/aamirpreneur/ce-pinn"
+# PLACEHOLDER: fill in once the paper has a DOI (preprint or published).
+# preferred-citation:
+#   type: article
+#   title: "Conservation-embedded physics-informed neural networks for
+#     derivative-dependent invariants"
+#   authors:
+#     - family-names: Shehzad
+#       given-names: Aamir
+#     - family-names: Haq
+#       given-names: Sirajul
+#   journal: "Computer Physics Communications"
+#   year: 2026
+#   doi: "PLACEHOLDER"

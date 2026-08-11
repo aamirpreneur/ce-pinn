@@ -1,0 +1,22 @@
+{
+  "C1_drift": 0.0,
+  "C2_drift": 0.000400433462622331,
+  "C3_drift": 0.0005138328238136993,
+  "bc_error": 0.0010653359786103038,
+  "best_pde_loss": 3.2407537079926983e-06,
+  "total_steps": 52,
+  "newton_failures": 0,
+  "newton_clamped": 0,
+  "C1_ref": 106.61021413857281,
+  "C2_ref": 427.24643821292597,
+  "C3_ref": 2751.806379906578,
+  "L2_absolute": 0.0049308064437406365,
+  "L2_relative": 0.0030543804253434456,
+  "Linf": 0.015955581093935134,
+  "variant": "ce_poly",
+  "seed": 0,
+  "smoke": false,
+  "training_time_s": 656.4578649997711,
+  "code_version": "f226607bf810",
+  "code_commit": "ecdf58c"
+}
