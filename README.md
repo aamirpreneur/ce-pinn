@@ -5,7 +5,7 @@ projection that enforces a derivative-dependent integral invariant,
 $\int(u^2+\mu u_x^2)\,dx$, exactly, and a bound on what that delivers.
 
 This repository holds the code, notebooks, analysis scripts and archived
-run outputs behind a paper submitted to *Computer Physics Communications*.
+run outputs behind a manuscript in preparation.
 The manuscript source is not included here; see "Citing this work" below.
 
 ## Repository layout
